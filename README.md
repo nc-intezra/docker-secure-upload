@@ -70,6 +70,55 @@ The manifest lists every passed file with its original name, size, SHA-256,
 `scan_status` (`clean` or `unscanned`) and signature database. Withheld files
 are only counted; their names never cross the diode.
 
+## Prerequisites
+
+- A Linux host (written for Ubuntu Server) with at least 4 CPU cores and
+  6 GB RAM (the compose limits add up to about 5 GB, mostly clamd), plus disk for in-flight uploads
+  and quarantine on the same filesystem as the diode's watched folder.
+- **Docker Engine with the Compose plugin from Docker's own packages.**
+  `docker compose version` must report v2.
+
+> **Do not use the Docker snap** (`snap install docker`, or the "docker"
+> option offered by the Ubuntu Server installer). The snap is sandboxed to
+> your home folder: it cannot read `compose.yaml` in `/opt`, `/srv` or
+> `/root`, and it cannot bind-mount `DIODE_ROOT`. The usual symptom is
+> `no configuration file provided: not found` even when you run it from the
+> folder that holds `compose.yaml`. `which docker` printing
+> `/snap/bin/docker` means the snap is in use.
+
+### Installing Docker Engine on Ubuntu
+
+```sh
+# 1. Remove the snap if it is installed (this also deletes anything it stored).
+sudo snap remove --purge docker
+
+# 2. Add Docker's apt repository.
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+# 3. Install Engine, CLI, Buildx and Compose.
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# 4. Check.
+which docker              # /usr/bin/docker
+docker compose version    # Docker Compose version v2.x
+sudo docker run --rm hello-world
+```
+
+If a step fails, Docker's current instructions are at
+<https://docs.docker.com/engine/install/ubuntu/>.
+
+To run `docker` without `sudo`, add your user to the `docker` group
+(`sudo usermod -aG docker "$USER"`, then log out and back in). Membership
+of that group is equivalent to root on the host, so grant it only to
+administrators of this server.
+
 ## Host layout
 
 The diode's watched folder and the staging folders must be on **one
@@ -94,6 +143,9 @@ diode can read them; the diode needs write access to `outbox/` to remove
 what it has collected.
 
 ## Running
+
+Install Docker Engine first (see [Prerequisites](#prerequisites)), then from the
+repository folder:
 
 ```sh
 cp .env.example .env                                   # set PUBLIC_ORIGIN and DIODE_ROOT
