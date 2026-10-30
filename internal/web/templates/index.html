@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{.CSRF}}">
+<meta name="chunk-size" content="{{.ChunkSize}}">
+<meta name="max-file-size" content="{{.MaxFileSize}}">
+<meta name="max-batch-files" content="{{.MaxBatchFiles}}">
+<title>Secure file transfer</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="masthead">
+  <div class="wrap">
+    <h1>Secure file transfer</h1>
+    <p class="lede">Files are virus-scanned, fingerprinted with SHA-256 and passed to the data diode.</p>
+  </div>
+</header>
+
+<main class="wrap layout">
+  <section class="instructions" aria-labelledby="instructions-title">
+    <h2 id="instructions-title" class="visually-hidden">Instructions</h2>
+    {{.Instructions}}
+  </section>
+
+  <section class="panel" aria-labelledby="upload-title">
+    <h2 id="upload-title">Send files</h2>
+
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" spellcheck="false"
+             autocapitalize="none" maxlength="32" required aria-describedby="username-help username-error">
+      <p id="username-help" class="help">Lowercase letters, numbers, dot, dash or underscore. Recorded with every file.</p>
+      <p id="username-error" class="error" hidden></p>
+    </div>
+
+    <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="drop-help">
+      <p class="drop-title">Drop files here</p>
+      <p id="drop-help" class="help">or <span class="link-like">browse</span> to choose them</p>
+      <input id="file-input" type="file" multiple class="visually-hidden" tabindex="-1">
+    </div>
+
+    <ul id="file-list" class="file-list" aria-label="Selected files"></ul>
+
+    <div class="actions">
+      <button id="upload-btn" type="button" class="primary" disabled>Upload</button>
+      <button id="clear-btn" type="button" class="secondary" disabled>Clear list</button>
+    </div>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+  </section>
+</main>
+</body>
+</html>

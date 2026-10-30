@@ -1,0 +1,109 @@
+# Diode upload service: stage 1 (user site, scanning, outbox handoff).
+#
+# Before the first start:
+#   1. Copy .env.example to .env and set PUBLIC_ORIGIN and DIODE_ROOT.
+#   2. Create the CSRF key:   head -c 48 /dev/urandom | base64 > secrets/csrf_key
+#   3. Put the TLS certificate and key in deploy/tls/ (see deploy/tls/README.md).
+#   4. Prepare DIODE_ROOT (see README "Host layout").
+name: diode-upload
+
+x-hardening: &hardening
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+
+services:
+  proxy:
+    <<: *hardening
+    image: nginxinc/nginx-unprivileged:stable-alpine # pin by digest in production
+    ports:
+      - "${HTTPS_BIND:-0.0.0.0}:443:8443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    tmpfs:
+      - /tmp
+    networks:
+      - frontend
+      - edge
+    depends_on:
+      - app
+    mem_limit: 256m
+    cpus: 1.0
+
+  app:
+    <<: *hardening
+    build: .
+    image: docker-secure-upload:local
+    user: "65532:65532"
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
+      TRUSTED_PROXY_CIDRS: 172.30.10.0/24 # the edge network below
+      DATA_DIR: /data
+      OUTBOX_DIR: /data/outbox
+      STATE_DIR: /state
+      CLAMD_ADDR: clamd:3310
+      CLAMD_MAX_SCAN_SIZE: 4000M # must match MaxScanSize in deploy/clamd/clamd.conf
+      CSRF_KEY_FILE: /run/secrets/csrf_key
+      HEALTH_ADDR: 0.0.0.0:9100
+      OVERSIZE_POLICY: ${OVERSIZE_POLICY:-pass}
+      QUARANTINE_ENABLED: ${QUARANTINE_ENABLED:-true}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-50GiB}
+      CHUNK_SIZE: 64MiB # nginx client_max_body_size must be this + 1 MiB
+    secrets:
+      - csrf_key
+    volumes:
+      - ${DIODE_ROOT:?set DIODE_ROOT in .env}:/data
+      - state:/state
+      - ./config/instructions.md:/config/instructions.md:ro
+    tmpfs:
+      - /tmp
+    ports:
+      # Health now, /metrics in stage 3. Bind to the monitoring interface.
+      - "${MONITORING_BIND:-127.0.0.1}:9100:9100"
+    networks:
+      - edge
+      - scan
+      - monitoring
+    mem_limit: 512m
+    cpus: 2.0
+
+  clamd:
+    # The official image runs freshclam and clamd and must start as root to
+    # drop to the clamav user, so it keeps its default capabilities.
+    image: clamav/clamav:stable # pin by digest in production
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    volumes:
+      - ${DIODE_ROOT}:/data:ro
+      - ./deploy/clamd/clamd.conf:/etc/clamav/clamd.conf:ro
+      - clamdb:/var/lib/clamav
+    networks:
+      - scan
+      - updates # remove if signatures come from an internal mirror on the scan network
+    mem_limit: 4g
+    cpus: 2.0
+
+networks:
+  frontend: {}
+  edge:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+  scan:
+    internal: true
+  monitoring: {}
+  updates: {}
+
+volumes:
+  state: {}
+  clamdb: {}
+
+secrets:
+  csrf_key:
+    file: ./secrets/csrf_key

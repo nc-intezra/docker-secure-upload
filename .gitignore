@@ -1,0 +1,8 @@
+.env
+secrets/*
+!secrets/README.md
+deploy/tls/*
+!deploy/tls/README.md
+/diode-upload
+*.test
+*.out
