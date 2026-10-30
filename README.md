@@ -165,6 +165,15 @@ curl -s http://127.0.0.1:9100/readyz                   # 200 once clamd is prove
 docker compose exec app diode-upload verify-audit      # check the audit hash chain
 ```
 
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `no configuration file provided: not found` | The Docker snap is in use. See [Prerequisites](#prerequisites). |
+| `state store: mkdir /state/batches: permission denied` | The `state` volume was created by an image from before v0.5.1, so it is owned by root. If nothing has been uploaded yet: `docker compose down`, then `docker volume rm diode-upload_state`, then `docker compose up -d --build`. To keep existing data instead: `docker run --rm -v diode-upload_state:/state busybox chown -R 65532:65532 /state` |
+| `storage layout: ... permission denied` or `outbox: ... no such file or directory` | `DIODE_ROOT` or its `outbox/` is missing or not writable by uid 65532. See [Host layout](#host-layout). |
+| Uploads stay at "Scanning" for a long time after the first start | clamd is still downloading signatures. `docker compose logs -f clamd`; scanning starts after the app logs `clamd self-test passed`. |
+
 ## Configuration
 
 | Variable | Default | Notes |
