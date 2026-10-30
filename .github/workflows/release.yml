@@ -1,0 +1,91 @@
+# Publishes a GitHub release. Run it from the Actions tab: "release" -> Run workflow.
+#
+# It tests the chosen commit, builds static Linux binaries with checksums,
+# creates the tag and publishes the release with the notes in
+# .github/release-notes/<tag>.md.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create (semver, e.g. v0.5.0-beta)"
+        required: true
+        default: v0.5.0-beta
+      title:
+        description: "Release title"
+        required: true
+        default: v0.5-beta
+      prerelease:
+        description: "Mark as a pre-release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag and the release
+    env:
+      # Inputs reach the shell only through environment variables, never by
+      # template expansion inside scripts.
+      TAG: ${{ inputs.tag }}
+      TITLE: ${{ inputs.title }}
+      PRERELEASE: ${{ inputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check inputs
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag must be semver such as v0.5.0-beta"; exit 1
+          fi
+          if ! printf '%s' "$TITLE" | grep -Eq '^[0-9A-Za-z .()_+-]{1,64}$'; then
+            echo "::error::title may use letters, digits, spaces and . ( ) _ + - (max 64)"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG already exists"; exit 1
+          fi
+          test -f ".github/release-notes/$TAG.md" || { echo "::error::missing .github/release-notes/$TAG.md"; exit 1; }
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: false
+
+      - name: Test
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race -count=1 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w -buildid=" \
+              -o "dist/diode-upload-$TAG-linux-$arch" ./cmd/diode-upload
+          done
+          (cd dist && sha256sum diode-upload-* > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Tag and publish
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$TITLE" \
+            --notes-file ".github/release-notes/$TAG.md" \
+            "${flags[@]}"
+          echo "Published $TAG at $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
