@@ -44,3 +44,42 @@ jobs:
           cp .env.example .env
           mkdir -p secrets && head -c 48 /dev/urandom | base64 > secrets/csrf_key
           docker compose config --quiet
+
+  # Starts the real clamav image with the shipped clamd.conf and scans
+  # through our own client: catches config clamd rejects, and checks that
+  # oversized files are flagged rather than passed as OK.
+  clamd:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: false
+      - name: start clamd with deploy/clamd/clamd.conf
+        run: |
+          mkdir -p /tmp/scan && chmod 0755 /tmp/scan
+          docker run -d --name clamd -p 127.0.0.1:3310:3310 \
+            -v "$PWD/deploy/clamd/clamd.conf:/etc/clamav/clamd.conf:ro" \
+            -v /tmp/scan:/data:ro \
+            clamav/clamav:stable
+          status=starting
+          for i in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' clamd)
+            [ "$status" = healthy ] && break
+            sleep 10
+          done
+          docker logs clamd 2>&1 | tail -40
+          echo "health: $status"
+          test "$status" = healthy
+      - name: scan through our client
+        env:
+          CLAMD_ADDR: 127.0.0.1:3310
+          CLAMD_TEST_HOST_DIR: /tmp/scan
+          CLAMD_TEST_SEEN_AS: /data
+        run: go test -tags integration -count=1 -v -run TestRealClamd ./internal/clamd/
+      - name: clamd log
+        if: always()
+        run: docker logs clamd 2>&1 | tail -60
+
