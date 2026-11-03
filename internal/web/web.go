@@ -180,24 +180,50 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 		}
 		sid, ok := sidFrom(r.Context())
 		if !ok {
-			jsonError(w, http.StatusForbidden, "no_session", "reload the page and try again")
+			s.reject(w, r, "no_session", "reload the page and try again")
 			return
 		}
 		if r.Header.Get("Origin") != s.PublicOrigin {
-			jsonError(w, http.StatusForbidden, "bad_origin", "request did not come from this site")
+			s.reject(w, r, "bad_origin", "request did not come from this site")
 			return
 		}
 		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
-			jsonError(w, http.StatusForbidden, "bad_origin", "request did not come from this site")
+			s.reject(w, r, "bad_origin", "request did not come from this site")
 			return
 		}
 		got := r.Header.Get("X-CSRF-Token")
 		if !hmac.Equal([]byte(got), []byte(s.csrfToken(sid))) {
-			jsonError(w, http.StatusForbidden, "bad_csrf", "reload the page and try again")
+			s.reject(w, r, "bad_csrf", "reload the page and try again")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// reject answers 403 and logs why, with what the browser sent next to what
+// the server expected. The most common cause in practice is PUBLIC_ORIGIN not
+// matching the address users type, and this log line shows both. Header
+// values are client-controlled: they are truncated, and the JSON log handler
+// escapes them.
+func (s *Server) reject(w http.ResponseWriter, r *http.Request, kind, msg string) {
+	s.Log.Warn("request rejected",
+		"reason", kind,
+		"method", r.Method,
+		"path", clip(r.URL.Path),
+		"client_ip", s.clientIP(r),
+		"origin", clip(r.Header.Get("Origin")),
+		"expected_origin", s.PublicOrigin,
+		"sec_fetch_site", clip(r.Header.Get("Sec-Fetch-Site")),
+		"has_csrf_token", r.Header.Get("X-CSRF-Token") != "",
+	)
+	jsonError(w, http.StatusForbidden, kind, msg)
+}
+
+func clip(v string) string {
+	if len(v) > 200 {
+		return v[:200] + "..."
+	}
+	return v
 }
 
 func jsonError(w http.ResponseWriter, code int, kind, msg string) {
