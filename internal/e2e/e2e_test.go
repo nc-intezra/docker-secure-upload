@@ -188,8 +188,10 @@ func (c *client) do(method, path string, body io.Reader, hdr map[string]string) 
 	return res
 }
 
-func (c *client) batch(user string, n int) string {
-	res := c.do("POST", "/api/v1/batches", strings.NewReader(fmt.Sprintf(`{"username":%q,"file_count":%d}`, user, n)),
+func (c *client) batch(user string, n int) string { return c.batchOpts(user, n, false) }
+
+func (c *client) batchOpts(user string, n int, prefix bool) string {
+	res := c.do("POST", "/api/v1/batches", strings.NewReader(fmt.Sprintf(`{"username":%q,"file_count":%d,"prefix_names":%t}`, user, n, prefix)),
 		map[string]string{"Content-Type": "application/json"})
 	defer res.Body.Close()
 	if res.StatusCode != 201 {
@@ -276,7 +278,7 @@ func TestEndToEnd(t *testing.T) {
 	bomb := []byte("NESTED-BOMB")
 	empty := []byte{}
 
-	b := c.batch("JSmith", 5)
+	b := c.batchOpts("JSmith", 5, true) // opted in to batch-prefixed names
 	type item struct {
 		name string
 		data []byte
@@ -336,7 +338,7 @@ func TestEndToEnd(t *testing.T) {
 		got = append(got, x.Name())
 	}
 	want := []string{
-		b + "_001_Site_Survey.zip", b + "_001_Site_Survey.zip.sha256",
+		b + "_001_Site Survey.zip", b + "_001_Site Survey.zip.sha256",
 		b + "_003_vm-image.qcow2", b + "_003_vm-image.qcow2.sha256",
 		b + "_005_empty.txt", b + "_005_empty.txt.sha256",
 		b + ".manifest.json",
@@ -349,12 +351,12 @@ func TestEndToEnd(t *testing.T) {
 	if !strings.HasPrefix(b, time.Now().UTC().Format("20060102")) || !strings.Contains(b, "-jsmith-") {
 		t.Errorf("batch id %s", b)
 	}
-	data, _ := os.ReadFile(filepath.Join(e.paths.Outbox, b+"_001_Site_Survey.zip"))
+	data, _ := os.ReadFile(filepath.Join(e.paths.Outbox, b+"_001_Site Survey.zip"))
 	if !bytes.Equal(data, clean) {
 		t.Fatal("outbox file differs from upload")
 	}
-	side, _ := os.ReadFile(filepath.Join(e.paths.Outbox, b+"_001_Site_Survey.zip.sha256"))
-	if string(side) != sha(clean)+"  "+b+"_001_Site_Survey.zip\n" {
+	side, _ := os.ReadFile(filepath.Join(e.paths.Outbox, b+"_001_Site Survey.zip.sha256"))
+	if string(side) != sha(clean)+"  "+b+"_001_Site Survey.zip\n" {
 		t.Fatalf("sidecar %q", side)
 	}
 
@@ -520,5 +522,71 @@ func TestCrashRecoveryPlacesFile(t *testing.T) {
 	}
 	if _, err := os.Stat(name + ".sha256"); err != nil {
 		t.Fatal("sidecar not re-written")
+	}
+}
+
+// By default files keep their own names. A second file with the same name
+// waits until the diode has collected the first one; it never overwrites it.
+func TestPlainNamesWaitForSameName(t *testing.T) {
+	e := newEnv(t, true)
+	c := e.newClient()
+	first, second := []byte("first version"), []byte("second version")
+
+	a := c.batch("alice", 1)
+	loc, _ := c.create(a, "Quarterly Report (final).pdf", len(first))
+	c.upload(loc, first)
+	c.waitClosed(a)
+
+	name := filepath.Join(e.paths.Outbox, "Quarterly Report (final).pdf")
+	if got, _ := os.ReadFile(name); !bytes.Equal(got, first) {
+		t.Fatalf("first file not in outbox under its own name: %q", got)
+	}
+	side, _ := os.ReadFile(name + ".sha256")
+	if string(side) != sha(first)+"  Quarterly Report (final).pdf\n" {
+		t.Fatalf("sidecar %q", side)
+	}
+
+	b := c.batch("bob", 1)
+	loc, _ = c.create(b, "Quarterly Report (final).pdf", len(second))
+	c.upload(loc, second)
+	// Scanned and passed, but waiting: the first file is still there.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		res := c.do("GET", "/api/v1/batches/"+b, nil, nil)
+		var s status
+		json.NewDecoder(res.Body).Decode(&s)
+		res.Body.Close()
+		if s.Files[0].State == "sent" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	e.pipe.Janitor()
+	if got, _ := os.ReadFile(name); !bytes.Equal(got, first) {
+		t.Fatal("first file was overwritten")
+	}
+
+	// The diode collects the data file; its sidecar is still there, so the
+	// second file keeps waiting.
+	os.Remove(name)
+	e.pipe.Janitor()
+	if _, err := os.Stat(name); err == nil {
+		t.Fatal("second file placed while the first file's sidecar was still in the outbox")
+	}
+
+	// The sidecar goes too; now the second file moves in.
+	os.Remove(name + ".sha256")
+	e.pipe.Janitor()
+	c.waitClosed(b)
+	if got, _ := os.ReadFile(name); !bytes.Equal(got, second) {
+		t.Fatalf("second file not placed: %q", got)
+	}
+	side, _ = os.ReadFile(name + ".sha256")
+	if string(side) != sha(second)+"  Quarterly Report (final).pdf\n" {
+		t.Fatalf("second sidecar %q", side)
+	}
+	raw, _ := os.ReadFile(filepath.Join(e.paths.Outbox, b+".manifest.json"))
+	if !strings.Contains(string(raw), `"name": "Quarterly Report (final).pdf"`) {
+		t.Fatalf("manifest: %s", raw)
 	}
 }

@@ -59,16 +59,41 @@ being held.
 
 ## Outbox format
 
+By default each file keeps the name it had on the sender's computer:
+
 ```
 outbox/
-  20261030T141502Z-jsmith-a3f9c1_001_Site_Survey.zip
-  20261030T141502Z-jsmith-a3f9c1_001_Site_Survey.zip.sha256   # "<hex>  <name>", works with sha256sum -c
-  20261030T141502Z-jsmith-a3f9c1.manifest.json
+  Quarterly Report (final).pdf
+  Quarterly Report (final).pdf.sha256          # "<hex>  <name>", works with sha256sum -c
+  20261103T141502Z-jsmith-a3f9c1.manifest.json
 ```
 
-The manifest lists every passed file with its original name, size, SHA-256,
-`scan_status` (`clean` or `unscanned`) and signature database. Withheld files
-are only counted; their names never cross the diode.
+If the sender ticks **Add the batch ID and my username to file names**, names
+start with the batch ID and a sequence number instead:
+`20261103T141502Z-jsmith-a3f9c1_001_Quarterly Report (final).pdf`. The batch ID,
+username and original name are always in the manifest and the audit log.
+
+Names are changed only where they must be:
+
+- any directory part is dropped
+- characters illegal on Linux or Windows (control characters and `< > : " / \ | ? *`) become `_`
+- leading dots and spaces, trailing dots and spaces, are removed
+- Windows device names (`CON`, `NUL`, `COM1` ...) get a leading `_`
+- names over 180 bytes are shortened, keeping the extension
+
+Spaces, accented and non-Latin letters, brackets and other punctuation are
+kept, so scripts on the receiving side must quote file names.
+
+Without the prefix, two uploads can have the same name. A file is never
+written over another: if a file with the same name, or its `.sha256`, is
+still in the outbox, the new file waits (checked every 10 seconds) until the
+diode has collected both. If they are still there after an hour, the new
+file is held instead. The receiving side decides what happens when a second
+file with the same name arrives there.
+
+The manifest lists every passed file with its outbox name, original name,
+size, SHA-256, `scan_status` (`clean` or `unscanned`) and signature database.
+Withheld files are only counted; their names never cross the diode.
 
 ## Prerequisites
 
@@ -209,7 +234,8 @@ docker compose exec app diode-upload verify-audit      # check the audit hash ch
 - **Isolation between users:** batches and uploads belong to the browser
   session that created them; anything else answers 404.
 - **Injection:** client file names never touch the filesystem (files are
-  stored by random ID; outbox names are sanitized to `[A-Za-z0-9._-]`);
+  stored by random ID; outbox names keep only characters safe on Linux and
+  Windows, see [Outbox format](#outbox-format));
   tus metadata keys are whitelisted; no shell, no SQL; the page uses no
   `innerHTML` and runs under a strict CSP with Trusted Types.
 - **Containers:** non-root, read-only root filesystem, `cap_drop: ALL`

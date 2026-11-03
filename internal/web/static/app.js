@@ -22,6 +22,7 @@
   const uploadBtn = $("upload-btn");
   const clearBtn = $("clear-btn");
   const statusEl = $("status");
+  const prefixBox = $("prefix-names");
 
   /** @type {{file: File, key: string, url: string|null, id: string|null, state: string, sha256: string, sent: number, cancelled: boolean, xhr: XMLHttpRequest|null, row: HTMLElement}[]} */
   let entries = [];
@@ -101,10 +102,13 @@
     bar.max = 100; bar.value = 0;
     li.appendChild(bar);
     li.appendChild(el("p", "file-state", LABELS.queued));
+    const sentAs = el("p", "file-hash");
+    sentAs.hidden = true;
+    li.appendChild(sentAs);
     const hash = el("p", "file-hash");
     hash.hidden = true;
     li.appendChild(hash);
-    entry.parts = { btn, bar, state: li.querySelector(".file-state"), hash };
+    entry.parts = { btn, bar, state: li.querySelector(".file-state"), sentAs, hash };
     return li;
   }
 
@@ -117,6 +121,10 @@
     if (note) label += `: ${note}`;
     p.state.textContent = label;
     entry.row.dataset.state = entry.state;
+    if (entry.sentAs && (entry.state === "sent" || entry.state === "sent_unscanned")) {
+      p.sentAs.hidden = false;
+      p.sentAs.textContent = `Arrives as: ${entry.sentAs}`;
+    }
     if (entry.sha256) {
       p.hash.hidden = false;
       p.hash.textContent = "";
@@ -179,6 +187,7 @@
     uploadBtn.disabled = busy || entries.length === 0 || !checkUser(false) || entries.every((e) => FINAL.has(e.state));
     clearBtn.disabled = busy || entries.length === 0;
     userInput.disabled = busy;
+    prefixBox.disabled = busy;
     drop.setAttribute("aria-disabled", busy ? "true" : "false");
   }
 
@@ -317,6 +326,7 @@
         if (f.state !== "uploading") {
           e.state = f.state;
           if (f.sha256) e.sha256 = f.sha256;
+          if (f.sent_as) e.sentAs = f.sent_as;
           render(e);
         }
       }
@@ -336,7 +346,7 @@
     say("Starting…");
     let batch;
     try {
-      batch = await api("POST", "/api/v1/batches", { username: user, file_count: todo.length });
+      batch = await api("POST", "/api/v1/batches", { username: user, file_count: todo.length, prefix_names: prefixBox.checked });
     } catch (err) {
       busy = false;
       refreshButtons();

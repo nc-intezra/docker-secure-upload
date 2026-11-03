@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
@@ -289,8 +290,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 	info, _ := reqctx.From(r.Context())
 	var req struct {
-		Username  string `json:"username"`
-		FileCount int    `json:"file_count"`
+		Username    string `json:"username"`
+		FileCount   int    `json:"file_count"`
+		PrefixNames bool   `json:"prefix_names"` // opt-in: <batchid>_<seq>_ before each name
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		jsonError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -308,7 +310,7 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	b := store.Batch{
 		ID: names.NewBatchID(now, user), Username: user, ClientIP: info.ClientIP,
-		SessionHash: info.SessionHash, FileCount: req.FileCount, CreatedAt: now,
+		SessionHash: info.SessionHash, FileCount: req.FileCount, PrefixNames: req.PrefixNames, CreatedAt: now,
 	}
 	if err := s.Store.CreateBatch(b); err != nil {
 		s.Log.Error("create batch", "err", err)
@@ -317,11 +319,11 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Audit.Append(audit.Event{
 		ActorType: "user", Actor: user, Action: "batch.created", BatchID: b.ID,
-		Details: map[string]string{"client_ip": info.ClientIP, "file_count": jsonInt(req.FileCount)},
+		Details: map[string]string{"client_ip": info.ClientIP, "file_count": jsonInt(req.FileCount), "prefix_names": fmt.Sprint(req.PrefixNames)},
 	}); err != nil {
 		s.Log.Error("audit append", "err", err)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"batch_id": b.ID, "username": user})
+	writeJSON(w, http.StatusCreated, map[string]any{"batch_id": b.ID, "username": user, "prefix_names": b.PrefixNames})
 }
 
 func jsonInt(n int) string { b, _ := json.Marshal(n); return string(b) }
@@ -368,13 +370,18 @@ func (s *Server) batchStatus(w http.ResponseWriter, r *http.Request) {
 		Received int64  `json:"received"`
 		State    string `json:"state"`
 		SHA256   string `json:"sha256,omitempty"`
+		SentAs   string `json:"sent_as,omitempty"` // outbox name, when it differs from name
 	}
 	files := []file{}
 	for _, u := range s.Store.BatchUploads(id) {
-		files = append(files, file{u.ID, u.Seq, u.OriginalName, u.Size, u.Offset, publicState(u.State), u.SHA256})
+		f := file{ID: u.ID, Seq: u.Seq, Name: u.OriginalName, Size: u.Size, Received: u.Offset, State: publicState(u.State), SHA256: u.SHA256}
+		if u.OutboxName != u.OriginalName {
+			f.SentAs = u.OutboxName
+		}
+		files = append(files, f)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"batch_id": b.ID, "username": b.Username, "file_count": b.FileCount,
-		"closed": !b.ClosedAt.IsZero(), "files": files,
+		"closed": !b.ClosedAt.IsZero(), "prefix_names": b.PrefixNames, "files": files,
 	})
 }

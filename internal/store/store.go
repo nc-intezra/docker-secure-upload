@@ -53,9 +53,10 @@ type Batch struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
 	ClientIP     string    `json:"client_ip"`
-	SessionHash  string    `json:"session_hash"` // SHA-256 of the session ID
-	FileCount    int       `json:"file_count"`   // files the client declared
-	Created      int       `json:"created"`      // uploads created so far
+	SessionHash  string    `json:"session_hash"`           // SHA-256 of the session ID
+	FileCount    int       `json:"file_count"`             // files the client declared
+	PrefixNames  bool      `json:"prefix_names,omitempty"` // sender opted in to <batchid>_<seq>_ names
+	Created      int       `json:"created"`                // uploads created so far
 	CreatedAt    time.Time `json:"created_at"`
 	ClosedAt     time.Time `json:"closed_at,omitzero"`
 	ManifestName string    `json:"manifest_name,omitempty"`

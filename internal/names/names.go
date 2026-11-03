@@ -45,8 +45,11 @@ func NewBatchID(now time.Time, username string) string {
 // ValidBatchID reports whether s has the shape NewBatchID produces.
 func ValidBatchID(s string) bool { return batchIDPattern.MatchString(s) }
 
+// maxSafeNameBytes keeps every outbox name, with the optional 61-byte
+// batch prefix and the 7-byte ".sha256" suffix, under the 255-byte limit of
+// common filesystems.
 const (
-	maxSafeNameBytes = 120
+	maxSafeNameBytes = 180
 	maxExtBytes      = 16
 )
 
@@ -56,38 +59,44 @@ var reserved = map[string]bool{
 	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
 }
 
-// SafeName turns a client-supplied file name into one that is safe on any
-// filesystem: no directory part, ASCII letters, digits, '.', '_' and '-'
-// only, no leading dot or dash, at most 120 bytes with the extension kept,
-// and never a Windows reserved device name.
-func SafeName(original string) string {
-	// Drop any directory part, whichever separator the client used.
-	s := strings.ReplaceAll(original, "\\", "/")
-	s = path.Base(s)
-	if s == "." || s == "/" {
-		s = ""
+// unsafeRune reports characters that cannot appear in a file name on Linux
+// or Windows, or that would make the name misleading or hard to handle:
+// control characters, line separators and the Windows-reserved punctuation.
+func unsafeRune(r rune) bool {
+	switch {
+	case r < 0x20, r == 0x7f, r >= 0x80 && r < 0xa0, r == '\u2028', r == '\u2029':
+		return true
 	}
+	return strings.ContainsRune(`<>:"/\|?*`, r)
+}
 
+// SafeName keeps the user's file name as written wherever it is safe, so the
+// file arrives with the name its sender expects. It only:
+//   - drops any directory part, whichever separator the client used;
+//   - replaces characters that are illegal on Linux or Windows (control
+//     characters and < > : " / \ | ? *) with '_';
+//   - removes leading dots (hidden files) and leading or trailing spaces, and
+//     trailing dots (Windows strips them);
+//   - prefixes Windows device names such as CON or NUL with '_';
+//   - shortens names over 180 bytes, keeping the extension.
+//
+// Spaces, letters in any script, and other punctuation are kept.
+func SafeName(original string) string {
+	s := strings.ReplaceAll(original, "\\", "/")
+	if i := strings.LastIndexByte(s, '/'); i >= 0 {
+		s = s[i+1:]
+	}
 	var b strings.Builder
-	lastUnderscore := false
 	for _, r := range s {
-		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_'
-		if !ok {
+		if r == utf8.RuneError || unsafeRune(r) {
 			r = '_'
-		}
-		if r == '_' {
-			if lastUnderscore {
-				continue
-			}
-			lastUnderscore = true
-		} else {
-			lastUnderscore = false
 		}
 		b.WriteRune(r)
 	}
-	s = strings.TrimLeft(b.String(), ".-")
-	s = strings.TrimRight(s, ".") // Windows strips trailing dots
-	if s == "" || s == "_" {
+	s = strings.TrimSpace(b.String())
+	s = strings.TrimLeft(s, ".")
+	s = strings.TrimSpace(strings.TrimRight(s, ". "))
+	if strings.Trim(s, "_") == "" {
 		s = "file"
 	}
 
@@ -96,21 +105,30 @@ func SafeName(original string) string {
 		if len(ext) > maxExtBytes || len(ext) <= 1 {
 			ext = ""
 		}
-		s = s[:maxSafeNameBytes-len(ext)] + ext
+		stem := s[:len(s)-len(ext)]
+		cut := maxSafeNameBytes - len(ext)
+		for cut > 0 && !utf8.RuneStart(stem[cut]) {
+			cut-- // never split a multi-byte character
+		}
+		s = strings.TrimRight(stem[:cut], ". ") + ext
 	}
 
 	stem := strings.ToLower(s)
 	if i := strings.IndexByte(stem, '.'); i >= 0 {
 		stem = stem[:i]
 	}
-	if reserved[stem] {
+	if reserved[strings.TrimSpace(stem)] {
 		s = "_" + s
 	}
 	return s
 }
 
-// OutboxName builds <batchid>_<seq>_<safe name>.
-func OutboxName(batchID string, seq int, original string) string {
+// OutboxName returns the name a file gets in the outbox: its safe name, or,
+// when the sender opted in, <batchid>_<seq>_<safe name>.
+func OutboxName(batchID string, seq int, original string, prefix bool) string {
+	if !prefix {
+		return SafeName(original)
+	}
 	return fmt.Sprintf("%s_%03d_%s", batchID, seq, SafeName(original))
 }
 

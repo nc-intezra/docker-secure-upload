@@ -36,6 +36,12 @@
       <p id="username-error" class="error" hidden></p>
     </div>
 
+    <div class="field checkbox">
+      <input id="prefix-names" type="checkbox" aria-describedby="prefix-help">
+      <label for="prefix-names">Add the batch ID and my username to file names</label>
+      <p id="prefix-help" class="help">Off: files arrive with the names they have now. On: each name starts with the date, time, your username and a batch number, for example <code>20261103T141502Z-jsmith-a3f9c1_001_report.pdf</code>.</p>
+    </div>
+
     <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="drop-help">
       <p class="drop-title">Drop files here</p>
       <p id="drop-help" class="help">or <span class="link-like">browse</span> to choose them</p>

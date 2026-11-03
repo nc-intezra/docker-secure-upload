@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestNormalizeUsername(t *testing.T) {
@@ -36,23 +37,35 @@ func TestBatchID(t *testing.T) {
 
 func TestSafeName(t *testing.T) {
 	cases := map[string]string{
-		"Site Survey.zip":         "Site_Survey.zip",
-		"../../etc/passwd":        "passwd",
-		"..\\..\\boot.ini":        "boot.ini",
-		".bashrc":                 "bashrc",
-		"-rf":                     "rf",
-		"résumé final.pdf":        "r_sum_final.pdf",
-		"a  ;$(rm -rf /).txt":     "_.txt",
-		"a  ;$(rm -rf).txt":       "a_rm_-rf_.txt",
-		"CON.txt":                 "_CON.txt",
-		"nul":                     "_nul",
-		"com1.tar.gz":             "_com1.tar.gz",
-		"":                        "file",
-		"...":                     "file",
-		"/":                       "file",
-		"日本語":                     "file",
-		"report.":                 "report",
+		// Kept exactly as written.
+		"Site Survey.zip":             "Site Survey.zip",
+		"résumé final (v2).pdf":       "résumé final (v2).pdf",
+		"日本語の資料.docx":                 "日本語の資料.docx",
+		"-rf":                         "-rf",
+		"a  ;$(rm -rf).txt":           "a  ;$(rm -rf).txt",
+		"report.tar.gz":               "report.tar.gz",
+		"budget [final] & notes.xlsx": "budget [final] & notes.xlsx",
+		// Directory parts dropped, whichever separator.
+		"../../etc/passwd":    "passwd",
+		"..\\..\\boot.ini":    "boot.ini",
+		"C:\\Users\\x\\a.txt": "a.txt",
+		// Characters illegal on Linux or Windows replaced.
+		"what?.txt":               "what_.txt",
+		"a<b>c:d\"e|f*g.txt":      "a_b_c_d_e_f_g.txt",
 		"name\x00with\x00nul.bin": "name_with_nul.bin",
+		"tab\there.txt":           "tab_here.txt",
+		// Hidden, trailing dots and spaces, device names.
+		".bashrc":        "bashrc",
+		"report.":        "report",
+		"  padded.txt  ": "padded.txt",
+		"CON.txt":        "_CON.txt",
+		"nul":            "_nul",
+		"com1.tar.gz":    "_com1.tar.gz",
+		// Nothing usable left.
+		"":    "file",
+		"...": "file",
+		"/":   "file",
+		"???": "file",
 	}
 	for in, want := range cases {
 		if got := SafeName(in); got != want {
@@ -61,15 +74,27 @@ func TestSafeName(t *testing.T) {
 	}
 	long := strings.Repeat("a", 300) + ".qcow2"
 	got := SafeName(long)
-	if len(got) != 120 || !strings.HasSuffix(got, ".qcow2") {
+	if len(got) != 180 || !strings.HasSuffix(got, ".qcow2") {
 		t.Errorf("long name not truncated with extension: %q (%d)", got, len(got))
+	}
+	// Truncation never splits a multi-byte character.
+	multi := SafeName(strings.Repeat("é", 200) + ".txt")
+	if !utf8.ValidString(multi) || len(multi) > 180 || !strings.HasSuffix(multi, ".txt") {
+		t.Errorf("multi-byte truncation: %q (%d)", multi, len(multi))
 	}
 }
 
 func TestOutboxName(t *testing.T) {
-	got := OutboxName("20261030T141502Z-jsmith-a3f9c1", 2, "vm image.qcow2")
-	if got != "20261030T141502Z-jsmith-a3f9c1_002_vm_image.qcow2" {
+	if got := OutboxName("20261030T141502Z-jsmith-a3f9c1", 2, "vm image.qcow2", false); got != "vm image.qcow2" {
 		t.Fatal(got)
+	}
+	if got := OutboxName("20261030T141502Z-jsmith-a3f9c1", 2, "vm image.qcow2", true); got != "20261030T141502Z-jsmith-a3f9c1_002_vm image.qcow2" {
+		t.Fatal(got)
+	}
+	// The longest prefixed name plus ".sha256" fits in 255 bytes.
+	id := "20261030T141502Z-" + strings.Repeat("a", 32) + "-a3f9c1"
+	if n := len(OutboxName(id, 500, strings.Repeat("x", 400), true) + ".sha256"); n > 255 {
+		t.Fatalf("name too long: %d", n)
 	}
 }
 

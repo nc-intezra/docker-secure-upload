@@ -94,6 +94,7 @@ type Pipeline struct {
 	queued  map[string]bool
 	closeMu sync.Mutex
 	placeMu sync.Mutex
+	waiting sync.Map // uploads already logged as waiting for an outbox name
 	healthy atomic.Bool
 	dbMu    sync.Mutex
 	db      string
@@ -267,6 +268,14 @@ func (p *Pipeline) finish(u store.Upload) {
 	}
 	err = p.place(fresh)
 	p.placeMu.Unlock()
+	if errors.Is(err, errOutboxBusy) {
+		// Retried by the janitor every few seconds; logged once per file.
+		if _, seen := p.waiting.LoadOrStore(u.ID, true); !seen {
+			p.Log.Info("waiting for the diode to collect a file with the same name", "upload", u.ID, "name", fresh.OutboxName)
+		}
+		return
+	}
+	p.waiting.Delete(u.ID)
 	if err != nil {
 		p.Log.Error("place file", "upload", u.ID, "state", fresh.State, "err", err)
 		return
@@ -285,13 +294,21 @@ func (p *Pipeline) place(u store.Upload) error {
 		switch u.State {
 		case store.StatePassed, store.StateUnscanned:
 			dest := filepath.Join(p.Paths.Outbox, u.OutboxName)
-			err = p.move(in, dest, staged)
+			if staged && p.occupied(in, dest) {
+				err = os.ErrExist
+			} else {
+				err = p.move(in, dest, staged)
+			}
 			if errors.Is(err, os.ErrExist) {
-				// Another file already has this name: never overwrite
-				// something the diode may be collecting. Hold instead.
+				// An earlier file with the same name (or its sidecar) is still
+				// in the outbox. Never overwrite something the diode may be
+				// collecting: wait for it to go, and hold only if it stays.
+				if p.now().Sub(u.ScannedAt) < OutboxWait {
+					return errOutboxBusy
+				}
 				u, err = p.Store.UpdateUpload(u.ID, func(x *store.Upload) error {
 					x.State = store.StateHeld
-					x.ScanReason = "outbox name already in use"
+					x.ScanReason = "a file with the same name stayed in the outbox for over " + OutboxWait.String()
 					return nil
 				})
 				if err != nil {
@@ -319,12 +336,55 @@ func (p *Pipeline) place(u store.Upload) error {
 	if u.State.InOutbox() && !u.SidecarDone {
 		line := fmt.Sprintf("%s  %s\n", u.SHA256, u.OutboxName)
 		dest := filepath.Join(p.Paths.Outbox, u.OutboxName+".sha256")
-		if err := fsutil.WriteAtomic(p.Paths.Tmp, dest, []byte(line)); err != nil {
-			return err
+		if err := writeNoReplace(p.Paths.Tmp, dest, []byte(line)); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			// Ours from an interrupted earlier attempt, or an older file's
+			// sidecar the diode has not collected yet.
+			if have, _ := os.ReadFile(dest); string(have) != line {
+				return errOutboxBusy
+			}
 		}
 		if _, err := p.Store.UpdateUpload(u.ID, func(x *store.Upload) error { x.SidecarDone = true; return nil }); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// OutboxWait is how long a file waits for an earlier file with the same
+// name to leave the outbox before it is held instead.
+const OutboxWait = time.Hour
+
+var errOutboxBusy = errors.New("outbox name in use")
+
+// occupied reports whether dest or its sidecar belongs to another file still
+// in the outbox. A dest that is the same file as src is our own interrupted
+// move, not a conflict.
+func (p *Pipeline) occupied(src, dest string) bool {
+	if b, err := os.Stat(dest); err == nil {
+		if a, err := os.Stat(src); err != nil || !os.SameFile(a, b) {
+			return true
+		}
+	}
+	_, err := os.Lstat(dest + ".sha256")
+	return err == nil
+}
+
+// writeNoReplace writes data to a temporary file in tmpDir and moves it to
+// dest without ever replacing an existing file.
+func writeNoReplace(tmpDir, dest string, data []byte) error {
+	tmp, err := fsutil.TempPath(tmpDir)
+	if err != nil {
+		return err
+	}
+	if err := fsutil.WriteAtomic(tmpDir, tmp, data); err != nil {
+		return err
+	}
+	if err := fsutil.MoveNoReplace(tmp, dest); err != nil {
+		os.Remove(tmp)
+		return err
 	}
 	return nil
 }
@@ -516,7 +576,9 @@ func (p *Pipeline) selfTest(ctx context.Context) error {
 }
 
 func (p *Pipeline) janitorLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	// Every 10 seconds, so files waiting for a name to clear move soon
+	// after the diode collects the earlier file (2 s settle time).
+	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	p.Janitor()
 	for {

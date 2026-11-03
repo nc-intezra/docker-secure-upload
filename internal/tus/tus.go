@@ -264,7 +264,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, info reqctx.Inf
 		if b.Created >= b.FileCount {
 			return errBatchFull
 		}
-		u.OutboxName = names.OutboxName(b.ID, seq, u.OriginalName)
+		u.OutboxName = names.OutboxName(b.ID, seq, u.OriginalName, b.PrefixNames)
 		return nil
 	})
 	if err != nil {

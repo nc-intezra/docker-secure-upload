@@ -40,6 +40,11 @@ body { margin: 0; }
 label { display: block; font-weight: 600; margin-bottom: 6px; }
 input[type="text"] { width: 100%; max-width: 320px; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); }
 input[aria-invalid="true"] { border-color: var(--bad); }
+.checkbox { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: start; }
+.checkbox input { margin: 4px 0 0; width: 18px; height: 18px; accent-color: var(--accent); }
+.checkbox label { font-weight: 600; margin: 0; }
+.checkbox .help { grid-column: 2; }
+.help code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: .85em; overflow-wrap: anywhere; }
 .help { margin: 6px 0 0; color: var(--muted); font-size: 0.9rem; }
 .error { margin: 6px 0 0; color: var(--bad); font-size: 0.9rem; }
 
