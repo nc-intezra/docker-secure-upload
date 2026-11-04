@@ -7,12 +7,13 @@ ARG GO_VERSION=1.27
 
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod VERSION ./
 # go.sum is absent while the module has no third-party dependencies.
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid=" \
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w -buildid= -X main.version=$(cat VERSION)" \
       -o /out/diode-upload ./cmd/diode-upload
 # Mount points owned by the runtime user. Docker copies a directory's
 # ownership into a new, empty named volume the first time it is mounted, so

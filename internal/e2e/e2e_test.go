@@ -90,7 +90,10 @@ type env struct {
 	cancel context.CancelFunc
 }
 
-func newEnv(t *testing.T, quarantine bool) *env {
+// option adjusts the service before it starts.
+type option func(*pipeline.Pipeline, *tus.Handler, *web.Server)
+
+func newEnv(t *testing.T, quarantine bool, opts ...option) *env {
 	t.Helper()
 	root := t.TempDir()
 	paths := pipeline.NewPaths(filepath.Join(root, "data"), filepath.Join(root, "data", "outbox"))
@@ -114,10 +117,6 @@ func newEnv(t *testing.T, quarantine bool) *env {
 		ClamdPrefix: paths.DataDir, ScanTimeout: 10 * time.Second, Concurrency: 2,
 		UploadExpiry: time.Hour, Log: log,
 	}
-	pipe.Init()
-	ctx, cancel := context.WithCancel(context.Background())
-	pipe.Start(ctx)
-
 	up := &tus.Handler{
 		BasePath: "/api/v1/uploads/", IncomingDir: paths.Incoming, Store: st, Audit: al,
 		Pipeline: pipe, MaxFileSize: 1 << 20, ChunkSize: 1024, Log: log,
@@ -127,6 +126,12 @@ func newEnv(t *testing.T, quarantine bool) *env {
 		Uploads: up, Instructions: web.RenderInstructions(web.DefaultInstructions),
 		MaxFileSize: 1 << 20, ChunkSize: 1024, MaxBatchFiles: 10, Log: log,
 	}
+	for _, o := range opts {
+		o(pipe, up, site)
+	}
+	pipe.Init()
+	ctx, cancel := context.WithCancel(context.Background())
+	pipe.Start(ctx)
 	srv := httptest.NewUnstartedServer(nil)
 	srv.StartTLS() // __Host- cookies need a secure origin
 	site.PublicOrigin = srv.URL

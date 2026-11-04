@@ -53,6 +53,9 @@ func (p Paths) Prepare() error {
 		if err := os.MkdirAll(d, fsutil.DirMode); err != nil {
 			return err
 		}
+		if err := tighten(d); err != nil {
+			return err
+		}
 	}
 	if _, err := os.Stat(p.Outbox); err != nil {
 		return fmt.Errorf("outbox: %w", err)
@@ -71,6 +74,26 @@ func (p Paths) Prepare() error {
 	}
 	for _, e := range ents {
 		os.RemoveAll(filepath.Join(p.Tmp, e.Name()))
+	}
+	return nil
+}
+
+// tighten brings a staging folder made by an earlier version (0755, files
+// 0644) down to DirMode and FileMode.
+func tighten(dir string) error {
+	if err := os.Chmod(dir, fsutil.DirMode); err != nil {
+		return fmt.Errorf("%s: %w (the folder must belong to uid 65532)", dir, err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if e.Type().IsRegular() {
+			if err := os.Chmod(filepath.Join(dir, e.Name()), fsutil.FileMode); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -286,24 +309,37 @@ func (p *Pipeline) finish(u store.Upload) {
 // place is idempotent: it can be re-run after a crash at any point.
 func (p *Pipeline) place(u store.Upload) error {
 	in := filepath.Join(p.Paths.Incoming, u.ID)
+	if u.State == store.StateReleased {
+		in = filepath.Join(p.Paths.Quarantine, u.ID)
+	}
 	_, statErr := os.Stat(in)
 	staged := statErr == nil
 
 	if !u.Placed {
 		var err error
 		switch u.State {
-		case store.StatePassed, store.StateUnscanned:
+		case store.StatePassed, store.StateUnscanned, store.StateReleased:
 			dest := filepath.Join(p.Paths.Outbox, u.OutboxName)
 			if staged && p.occupied(in, dest) {
 				err = os.ErrExist
 			} else {
+				if staged {
+					// The diode reads as another user.
+					if err := os.Chmod(in, fsutil.PublicFileMode); err != nil {
+						return err
+					}
+				}
 				err = p.move(in, dest, staged)
 			}
 			if errors.Is(err, os.ErrExist) {
 				// An earlier file with the same name (or its sidecar) is still
 				// in the outbox. Never overwrite something the diode may be
 				// collecting: wait for it to go, and hold only if it stays.
-				if p.now().Sub(u.ScannedAt) < OutboxWait {
+				since := u.ScannedAt
+				if u.State == store.StateReleased {
+					since = u.ReleasedAt
+				}
+				if p.now().Sub(since) < OutboxWait {
 					return errOutboxBusy
 				}
 				u, err = p.Store.UpdateUpload(u.ID, func(x *store.Upload) error {
@@ -336,7 +372,7 @@ func (p *Pipeline) place(u store.Upload) error {
 	if u.State.InOutbox() && !u.SidecarDone {
 		line := fmt.Sprintf("%s  %s\n", u.SHA256, u.OutboxName)
 		dest := filepath.Join(p.Paths.Outbox, u.OutboxName+".sha256")
-		if err := writeNoReplace(p.Paths.Tmp, dest, []byte(line)); err != nil {
+		if err := writeNoReplace(p.Paths.Tmp, dest, []byte(line), fsutil.PublicFileMode); err != nil {
 			if !errors.Is(err, os.ErrExist) {
 				return err
 			}
@@ -346,7 +382,17 @@ func (p *Pipeline) place(u store.Upload) error {
 				return errOutboxBusy
 			}
 		}
-		if _, err := p.Store.UpdateUpload(u.ID, func(x *store.Upload) error { x.SidecarDone = true; return nil }); err != nil {
+		var err error
+		if u, err = p.Store.UpdateUpload(u.ID, func(x *store.Upload) error { x.SidecarDone = true; return nil }); err != nil {
+			return err
+		}
+	}
+
+	if u.State == store.StateReleased && !u.ManifestDone {
+		if err := p.writeReleaseManifest(u); err != nil {
+			return err
+		}
+		if _, err := p.Store.UpdateUpload(u.ID, func(x *store.Upload) error { x.ManifestDone = true; return nil }); err != nil {
 			return err
 		}
 	}
@@ -374,12 +420,12 @@ func (p *Pipeline) occupied(src, dest string) bool {
 
 // writeNoReplace writes data to a temporary file in tmpDir and moves it to
 // dest without ever replacing an existing file.
-func writeNoReplace(tmpDir, dest string, data []byte) error {
+func writeNoReplace(tmpDir, dest string, data []byte, mode os.FileMode) error {
 	tmp, err := fsutil.TempPath(tmpDir)
 	if err != nil {
 		return err
 	}
-	if err := fsutil.WriteAtomic(tmpDir, tmp, data); err != nil {
+	if err := fsutil.WriteAtomicMode(tmpDir, tmp, data, mode); err != nil {
 		return err
 	}
 	if err := fsutil.MoveNoReplace(tmp, dest); err != nil {
@@ -431,8 +477,63 @@ type manifest struct {
 	Files         []manifestFile `json:"files"`
 	WithheldCount int            `json:"withheld_count"`
 	MissingCount  int            `json:"missing_count"`
+	Release       *releaseInfo   `json:"release,omitempty"`
+	AuditHead     audit.Head     `json:"audit_head"`
 	Generator     string         `json:"generator"`
 }
+
+// releaseInfo is present only in the manifest written when an operator
+// releases a held file after its batch has already closed.
+type releaseInfo struct {
+	UploadID   string    `json:"upload_id"`
+	HeldReason string    `json:"held_reason"`
+	ReleasedBy string    `json:"released_by"`
+	Reason     string    `json:"reason"`
+	ReleasedAt time.Time `json:"released_at"`
+}
+
+func fileEntry(u store.Upload) manifestFile {
+	f := manifestFile{
+		Name: u.OutboxName, OriginalName: u.OriginalName, Size: u.Size, SHA256: u.SHA256,
+		ScanStatus: "clean", ClamDB: u.ClamDB, ScannedAt: u.ScannedAt,
+	}
+	switch u.State {
+	case store.StateUnscanned:
+		f.ScanStatus = "unscanned"
+		f.ScanReason = u.ScanReason
+	case store.StateReleased:
+		f.ScanStatus = "released"
+		f.ScanReason = fmt.Sprintf("held (%s); released by %s: %s", u.HeldReason, u.ReleasedBy, u.ReleaseReason)
+	}
+	return f
+}
+
+// writeReleaseManifest describes one released file whose batch manifest
+// has already gone to the diode.
+func (p *Pipeline) writeReleaseManifest(u store.Upload) error {
+	b, err := p.Store.Batch(u.BatchID)
+	if err != nil {
+		return err
+	}
+	m := manifest{
+		Schema: 1, BatchID: b.ID, Username: b.Username, CreatedAt: b.CreatedAt,
+		ClosedAt: p.now(), DeclaredCount: 1, Files: []manifestFile{fileEntry(u)},
+		Release: &releaseInfo{
+			UploadID: u.ID, HeldReason: u.HeldReason, ReleasedBy: u.ReleasedBy,
+			Reason: u.ReleaseReason, ReleasedAt: u.ReleasedAt,
+		},
+		AuditHead: p.Audit.Head(), Generator: "docker-secure-upload " + Version,
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	name := b.ID + ".release-" + u.ID[:8] + ".manifest.json"
+	return fsutil.WriteAtomicMode(p.Paths.Tmp, filepath.Join(p.Paths.Outbox, name), append(data, '\n'), fsutil.PublicFileMode)
+}
+
+// Version is the service version written into manifests; main sets it.
+var Version = "dev"
 
 // maybeCloseBatch writes the manifest once every declared file has reached
 // an end state and been placed, or once the batch has been open longer than
@@ -445,14 +546,35 @@ func (p *Pipeline) maybeCloseBatch(batchID string) {
 		return
 	}
 	ups := p.Store.BatchUploads(batchID)
-	stale := p.now().Sub(b.CreatedAt) > p.UploadExpiry
+	// A batch is abandoned once nothing has happened in it for the upload
+	// expiry, so a slow multi-file batch is never closed under its sender.
+	last := b.CreatedAt
+	for _, u := range ups {
+		if u.UpdatedAt.After(last) {
+			last = u.UpdatedAt
+		}
+	}
+	stale := p.now().Sub(last) > p.UploadExpiry
 	if b.Created < b.FileCount && !stale {
+		return
+	}
+	if b.Created == 0 {
+		// Nothing was ever sent: drop the record rather than send the
+		// diode an empty manifest (audit finding M-4).
+		if _, err := p.Store.DeleteBatch(b.ID); err != nil {
+			p.Log.Error("discard empty batch", "batch", b.ID, "err", err)
+			return
+		}
+		_ = p.Audit.Append(audit.Event{
+			ActorType: "system", Actor: "janitor", Action: "batch.discarded", BatchID: b.ID,
+			Details: map[string]string{"reason": "no files were uploaded", "file_count_declared": fmt.Sprint(b.FileCount)},
+		})
 		return
 	}
 	m := manifest{
 		Schema: 1, BatchID: b.ID, Username: b.Username, CreatedAt: b.CreatedAt,
 		ClosedAt: p.now(), DeclaredCount: b.FileCount, Files: []manifestFile{},
-		Generator: "docker-secure-upload",
+		Generator: "docker-secure-upload " + Version,
 	}
 	for _, u := range ups {
 		if !u.State.Terminal() || !u.Placed || (u.State.InOutbox() && !u.SidecarDone) {
@@ -462,26 +584,19 @@ func (p *Pipeline) maybeCloseBatch(batchID string) {
 			m.WithheldCount++
 			continue
 		}
-		f := manifestFile{
-			Name: u.OutboxName, OriginalName: u.OriginalName, Size: u.Size, SHA256: u.SHA256,
-			ScanStatus: "clean", ClamDB: u.ClamDB, ScannedAt: u.ScannedAt,
-		}
-		if u.State == store.StateUnscanned {
-			f.ScanStatus = "unscanned"
-			f.ScanReason = u.ScanReason
-		}
-		m.Files = append(m.Files, f)
+		m.Files = append(m.Files, fileEntry(u))
 	}
 	if b.FileCount > b.Created {
 		m.MissingCount = b.FileCount - b.Created
 	}
+	m.AuditHead = p.Audit.Head()
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		p.Log.Error("manifest encode", "batch", b.ID, "err", err)
 		return
 	}
 	name := b.ID + ".manifest.json"
-	if err := fsutil.WriteAtomic(p.Paths.Tmp, filepath.Join(p.Paths.Outbox, name), append(data, '\n')); err != nil {
+	if err := fsutil.WriteAtomicMode(p.Paths.Tmp, filepath.Join(p.Paths.Outbox, name), append(data, '\n'), fsutil.PublicFileMode); err != nil {
 		p.Log.Error("manifest write", "batch", b.ID, "err", err)
 		return
 	}
@@ -616,8 +731,8 @@ func (p *Pipeline) Janitor() {
 		p.Enqueue(u.ID)
 	}
 	for _, u := range p.Store.UploadsIn(store.StatePassed, store.StateUnscanned, store.StateQuarantined,
-		store.StateHeld, store.StateDeleted, store.StateExpired) {
-		if !u.Placed || (u.State.InOutbox() && !u.SidecarDone) {
+		store.StateHeld, store.StateDeleted, store.StateExpired, store.StateReleased) {
+		if !u.Placed || (u.State.InOutbox() && !u.SidecarDone) || (u.State == store.StateReleased && !u.ManifestDone) {
 			p.finish(u)
 		}
 	}

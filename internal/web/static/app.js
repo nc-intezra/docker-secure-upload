@@ -32,6 +32,7 @@
     queued: "Ready",
     uploading: "Uploading",
     waiting: "Connection lost, retrying",
+    limited: "Waiting for your earlier uploads to finish",
     scanning: "Scanning for viruses",
     sent: "Sent to the diode",
     sent_unscanned: "Sent; too large to scan fully",
@@ -115,7 +116,7 @@
   function render(entry, note) {
     const p = entry.parts;
     const pct = entry.file.size ? Math.floor((entry.sent / entry.file.size) * 100) : 100;
-    p.bar.value = entry.state === "uploading" || entry.state === "waiting" ? pct : (FINAL.has(entry.state) || entry.state === "scanning" ? 100 : 0);
+    p.bar.value = entry.state === "uploading" || entry.state === "waiting" || entry.state === "limited" ? pct : (FINAL.has(entry.state) || entry.state === "scanning" ? 100 : 0);
     let label = LABELS[entry.state] || entry.state;
     if (entry.state === "uploading") label += ` ${pct}%`;
     if (note) label += `: ${note}`;
@@ -132,7 +133,7 @@
       p.hash.appendChild(el("code", "", entry.sha256));
     }
     if (!busy) p.btn.textContent = "Remove";
-    else if (entry.state === "uploading" || entry.state === "waiting" || entry.state === "queued") p.btn.textContent = "Cancel";
+    else if (["uploading", "waiting", "limited", "queued"].includes(entry.state)) p.btn.textContent = "Cancel";
     else p.btn.hidden = true;
   }
 
@@ -235,8 +236,22 @@
 
   async function createUpload(entry, batchId) {
     const meta = `batch_id ${b64(batchId)},filename ${b64(entry.file.name)}`;
-    const xhr = await tusRequest("POST", UPLOADS, { "Upload-Length": String(entry.file.size), "Upload-Metadata": meta }, null, null, entry);
+    let xhr;
+    // 429: this computer already has too much in flight. Wait for earlier
+    // uploads to finish rather than fail, for up to about half an hour.
+    for (let tries = 0; ; tries++) {
+      xhr = await tusRequest("POST", UPLOADS, { "Upload-Length": String(entry.file.size), "Upload-Metadata": meta }, null, null, entry);
+      if (xhr.status !== 429 || tries >= 30) break;
+      if (entry.cancelled) throw new Error("aborted");
+      entry.state = "limited";
+      render(entry);
+      const after = Number(xhr.getResponseHeader("Retry-After")) || 60;
+      await sleep(Math.min(120, Math.max(5, after)) * 1000);
+      if (entry.cancelled) throw new Error("aborted");
+    }
     if (xhr.status !== 201) throw new Fatal(xhr.responseText.trim() || `HTTP ${xhr.status}`);
+    entry.state = "uploading";
+    render(entry);
     const loc = xhr.getResponseHeader("Location") || "";
     if (!loc.startsWith(UPLOADS)) throw new Fatal("server returned an unexpected location");
     entry.url = loc;

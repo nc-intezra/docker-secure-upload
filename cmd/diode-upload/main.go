@@ -3,6 +3,10 @@
 //	diode-upload               run the service
 //	diode-upload healthcheck   exit 0 if the local /readyz answers 200 (for Docker)
 //	diode-upload verify-audit  check the audit log hash chain
+//	diode-upload version       print the version
+//	diode-upload held          list held and quarantined files
+//	diode-upload release ID --by NAME --reason TEXT
+//	diode-upload delete ID --by NAME --reason TEXT
 package main
 
 import (
@@ -14,26 +18,38 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"github.com/nc-intezra/docker-secure-upload/internal/audit"
 	"github.com/nc-intezra/docker-secure-upload/internal/clamd"
 	"github.com/nc-intezra/docker-secure-upload/internal/config"
+	"github.com/nc-intezra/docker-secure-upload/internal/control"
 	"github.com/nc-intezra/docker-secure-upload/internal/fsutil"
+	"github.com/nc-intezra/docker-secure-upload/internal/limits"
 	"github.com/nc-intezra/docker-secure-upload/internal/pipeline"
 	"github.com/nc-intezra/docker-secure-upload/internal/store"
 	"github.com/nc-intezra/docker-secure-upload/internal/tus"
 	"github.com/nc-intezra/docker-secure-upload/internal/web"
 )
 
+// version is set at build time with -ldflags "-X main.version=v0.5.3-beta".
+var version = "dev"
+
 func main() {
+	pipeline.Version = version
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "healthcheck":
 			os.Exit(healthcheck())
 		case "verify-audit":
 			os.Exit(verifyAudit())
+		case "version", "--version", "-v":
+			fmt.Printf("diode-upload %s (%s %s/%s)\n", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+			os.Exit(0)
+		case "held", "release", "delete":
+			os.Exit(operator(os.Args[1], os.Args[2:]))
 		default:
 			fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 			os.Exit(2)
@@ -100,6 +116,7 @@ func envOr(k, d string) string {
 }
 
 func run(log *slog.Logger) error {
+	log.Info("starting", "version", version, "go", runtime.Version())
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -135,6 +152,7 @@ func run(log *slog.Logger) error {
 	}
 	pipe.Init()
 
+	caps := &limits.Checker{Session: cfg.SessionLimits, IP: cfg.IPLimits, Store: st}
 	var rejectAbove int64
 	if cfg.OversizePolicy == config.OversizeReject {
 		rejectAbove = cfg.ClamdMaxScanSize
@@ -149,6 +167,7 @@ func run(log *slog.Logger) error {
 		ChunkSize:   cfg.ChunkSize,
 		DiskReserve: cfg.DiskReserve,
 		RejectAbove: rejectAbove,
+		Limits:      caps,
 		Log:         log,
 	}
 	site := &web.Server{
@@ -162,6 +181,7 @@ func run(log *slog.Logger) error {
 		MaxFileSize:    cfg.MaxFileSize,
 		ChunkSize:      cfg.ChunkSize,
 		MaxBatchFiles:  cfg.MaxBatchFiles,
+		Limits:         caps,
 		Log:            log,
 	}
 	handler, err := site.Handler()
@@ -172,9 +192,16 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	pipe.Start(ctx)
+	if cfg.ControlSocket != "" {
+		go func() {
+			if err := control.Serve(ctx, cfg.ControlSocket, pipe, log); err != nil {
+				log.Error("control socket", "err", err)
+			}
+		}()
+	}
 
 	_ = auditLog.Append(audit.Event{ActorType: "system", Actor: "service", Action: "service.started",
-		Details: map[string]string{"oversize_policy": string(cfg.OversizePolicy), "quarantine_enabled": fmt.Sprint(cfg.QuarantineEnabled)}})
+		Details: map[string]string{"version": version, "oversize_policy": string(cfg.OversizePolicy), "quarantine_enabled": fmt.Sprint(cfg.QuarantineEnabled)}})
 
 	userSrv := &http.Server{
 		Addr:              cfg.ListenAddr,

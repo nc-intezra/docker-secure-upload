@@ -41,7 +41,8 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.OutboxDir != "/data/outbox" || c.ChunkSize != 64<<20 || len(c.TrustedProxies) != 2 || c.OversizePolicy != OversizePass || !c.QuarantineEnabled {
+	if c.OutboxDir != "/data/outbox" || c.ChunkSize != 64<<20 || len(c.TrustedProxies) != 2 || c.OversizePolicy != OversizeHold || !c.QuarantineEnabled ||
+		c.UploadExpiry != time.Hour || c.SessionLimits.Reserved != 100<<30 || c.IPLimits.OpenUploads != 60 {
 		t.Fatalf("%+v", c)
 	}
 

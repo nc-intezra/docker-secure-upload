@@ -34,6 +34,7 @@ const (
 	StateDeleted     State = "deleted"     // infected with quarantine off, removed
 	StateHeld        State = "held"        // scan error or archive limit, in quarantine/
 	StateExpired     State = "expired"     // abandoned or aged out, removed
+	StateReleased    State = "released"    // held, then released to the outbox by an operator
 )
 
 // Terminal reports whether no further automatic transition will happen.
@@ -46,7 +47,9 @@ func (s State) Terminal() bool {
 }
 
 // InOutbox reports whether the file was handed to the diode.
-func (s State) InOutbox() bool { return s == StatePassed || s == StateUnscanned }
+func (s State) InOutbox() bool {
+	return s == StatePassed || s == StateUnscanned || s == StateReleased
+}
 
 // Batch groups the files one user sent in one go.
 type Batch struct {
@@ -87,6 +90,14 @@ type Upload struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 	CompletedAt  time.Time `json:"completed_at,omitzero"`
 	ScannedAt    time.Time `json:"scanned_at,omitzero"`
+
+	// Set when an operator releases a held file. HeldReason keeps why it
+	// was held, since ScanReason is what the manifest reports.
+	HeldReason    string    `json:"held_reason,omitempty"`
+	ReleasedBy    string    `json:"released_by,omitempty"`
+	ReleaseReason string    `json:"release_reason,omitempty"`
+	ReleasedAt    time.Time `json:"released_at,omitzero"`
+	ManifestDone  bool      `json:"manifest_done,omitempty"` // release manifest written
 }
 
 // ErrNotFound is returned for unknown IDs.
@@ -269,6 +280,25 @@ func (s *Store) CreateUpload(u Upload, prepare func(b *Batch, u *Upload, seq int
 	s.batches[nb.ID] = &nb
 	s.uploads[u.ID] = &u
 	return u, nil
+}
+
+// DeleteBatch removes a batch that never received an upload. It refuses
+// batches with uploads or a manifest, which must stay for the record.
+func (s *Store) DeleteBatch(id string) (Batch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.batches[id]
+	if !ok {
+		return Batch{}, ErrNotFound
+	}
+	if b.Created > 0 || !b.ClosedAt.IsZero() {
+		return Batch{}, fmt.Errorf("batch %s has uploads or is closed", id)
+	}
+	if err := s.remove("batches", id); err != nil {
+		return Batch{}, err
+	}
+	delete(s.batches, id)
+	return *b, nil
 }
 
 // Upload returns a copy of the upload.

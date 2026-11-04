@@ -49,6 +49,18 @@ type Config struct {
 	OversizePolicy    OversizePolicy
 	QuarantineEnabled bool
 	MaxBatchFiles     int
+	SessionLimits     Limits // per browser session
+	IPLimits          Limits // per client address (several sessions)
+	ControlSocket     string // unix socket for the held-file commands; "" = off
+}
+
+// Limits cap what one session or one client address may have open at once,
+// so a single client cannot reserve all staging space or flood the store
+// (audit finding H-3). Zero means no limit.
+type Limits struct {
+	OpenBatches int   // batches without a manifest yet
+	OpenUploads int   // uploads still receiving data
+	Reserved    int64 // bytes promised to unfinished uploads but not yet received
 }
 
 // Load reads the configuration from the environment.
@@ -60,8 +72,12 @@ func Load() (*Config, error) {
 		StateDir:          env("STATE_DIR", "/state"),
 		InstructionsFile:  env("INSTRUCTIONS_FILE", "/config/instructions.md"),
 		ClamdAddr:         env("CLAMD_ADDR", "clamd:3310"),
-		OversizePolicy:    OversizePolicy(env("OVERSIZE_POLICY", string(OversizePass))),
+		OversizePolicy:    OversizePolicy(env("OVERSIZE_POLICY", string(OversizeHold))),
 		QuarantineEnabled: true,
+		ControlSocket:     env("CONTROL_SOCKET", "/tmp/diode-upload.sock"),
+	}
+	if c.ControlSocket == "off" {
+		c.ControlSocket = ""
 	}
 	var errs []error
 	add := func(err error) {
@@ -82,13 +98,25 @@ func Load() (*Config, error) {
 	add(err)
 	c.ClamdMaxScanSize, err = sizeEnv("CLAMD_MAX_SCAN_SIZE", 4000<<20)
 	add(err)
-	c.UploadExpiry, err = durEnv("UPLOAD_EXPIRY", 24*time.Hour)
+	c.UploadExpiry, err = durEnv("UPLOAD_EXPIRY", time.Hour)
 	add(err)
 	c.ScanTimeout, err = durEnv("SCAN_TIMEOUT", 2*time.Hour)
 	add(err)
 	c.ScanConcurrency, err = intEnv("SCAN_CONCURRENCY", 2)
 	add(err)
 	c.MaxBatchFiles, err = intEnv("MAX_BATCH_FILES", 500)
+	add(err)
+	c.SessionLimits.OpenBatches, err = intEnv("SESSION_MAX_OPEN_BATCHES", 10)
+	add(err)
+	c.SessionLimits.OpenUploads, err = intEnv("SESSION_MAX_OPEN_UPLOADS", 20)
+	add(err)
+	c.SessionLimits.Reserved, err = sizeEnv("SESSION_MAX_RESERVED", 2*c.MaxFileSize)
+	add(err)
+	c.IPLimits.OpenBatches, err = intEnv("IP_MAX_OPEN_BATCHES", 3*c.SessionLimits.OpenBatches)
+	add(err)
+	c.IPLimits.OpenUploads, err = intEnv("IP_MAX_OPEN_UPLOADS", 3*c.SessionLimits.OpenUploads)
+	add(err)
+	c.IPLimits.Reserved, err = sizeEnv("IP_MAX_RESERVED", 3*c.SessionLimits.Reserved)
 	add(err)
 	if v := os.Getenv("QUARANTINE_ENABLED"); v != "" {
 		c.QuarantineEnabled, err = strconv.ParseBool(v)
@@ -146,6 +174,14 @@ func (c *Config) validate() error {
 	}
 	if c.ScanConcurrency < 1 || c.ScanConcurrency > 64 {
 		errs = append(errs, errors.New("SCAN_CONCURRENCY must be between 1 and 64"))
+	}
+	for name, l := range map[string]Limits{"SESSION_MAX_*": c.SessionLimits, "IP_MAX_*": c.IPLimits} {
+		if l.OpenBatches < 0 || l.OpenUploads < 0 || l.Reserved < 0 {
+			errs = append(errs, fmt.Errorf("%s limits must not be negative", name))
+		}
+	}
+	if c.UploadExpiry < time.Minute {
+		errs = append(errs, errors.New("UPLOAD_EXPIRY must be at least 1m"))
 	}
 	if c.MaxBatchFiles < 1 {
 		errs = append(errs, errors.New("MAX_BATCH_FILES must be positive"))

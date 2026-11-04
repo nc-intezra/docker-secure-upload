@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nc-intezra/docker-secure-upload/internal/audit"
+	"github.com/nc-intezra/docker-secure-upload/internal/limits"
 	"github.com/nc-intezra/docker-secure-upload/internal/names"
 	"github.com/nc-intezra/docker-secure-upload/internal/reqctx"
 	"github.com/nc-intezra/docker-secure-upload/internal/store"
@@ -54,6 +55,7 @@ type Server struct {
 	MaxFileSize    int64
 	ChunkSize      int64
 	MaxBatchFiles  int
+	Limits         *limits.Checker // nil = no per-session or per-address caps
 	Log            *slog.Logger
 
 	page   *template.Template
@@ -312,7 +314,20 @@ func (s *Server) createBatch(w http.ResponseWriter, r *http.Request) {
 		ID: names.NewBatchID(now, user), Username: user, ClientIP: info.ClientIP,
 		SessionHash: info.SessionHash, FileCount: req.FileCount, PrefixNames: req.PrefixNames, CreatedAt: now,
 	}
-	if err := s.Store.CreateBatch(b); err != nil {
+	create := func() error { return s.Store.CreateBatch(b) }
+	if s.Limits != nil {
+		err = s.Limits.Batch(info.SessionHash, info.ClientIP, create)
+	} else {
+		err = create()
+	}
+	var le *limits.Error
+	if errors.As(err, &le) {
+		s.Log.Warn("batch refused: limit", "client_ip", info.ClientIP, "user", user, "reason", le.Msg)
+		w.Header().Set("Retry-After", "60")
+		jsonError(w, http.StatusTooManyRequests, "limit", le.Msg)
+		return
+	}
+	if err != nil {
 		s.Log.Error("create batch", "err", err)
 		jsonError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
@@ -336,7 +351,7 @@ func publicState(st store.State) string {
 		return "uploading"
 	case store.StateScanning:
 		return "scanning"
-	case store.StatePassed:
+	case store.StatePassed, store.StateReleased:
 		return "sent"
 	case store.StateUnscanned:
 		return "sent_unscanned"

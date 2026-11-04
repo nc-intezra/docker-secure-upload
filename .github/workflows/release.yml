@@ -57,6 +57,9 @@ jobs:
             echo "::error::tag $TAG already exists"; exit 1
           fi
           test -f ".github/release-notes/$TAG.md" || { echo "::error::missing .github/release-notes/$TAG.md"; exit 1; }
+          if [ "$(cat VERSION)" != "$TAG" ]; then
+            echo "::error::VERSION file says $(cat VERSION), not $TAG"; exit 1
+          fi
 
       - uses: actions/setup-go@v5
         with:
@@ -74,7 +77,7 @@ jobs:
         run: |
           mkdir -p dist
           for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w -buildid=" \
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w -buildid= -X main.version=$TAG" \
               -o "dist/diode-upload-$TAG-linux-$arch" ./cmd/diode-upload
           done
           (cd dist && sha256sum diode-upload-* > SHA256SUMS && cat SHA256SUMS)

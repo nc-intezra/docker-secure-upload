@@ -107,6 +107,21 @@ func hashOf(e Event) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Head identifies the newest event in the chain. Copied into each batch
+// manifest, it lets the receiving side detect a later rewrite of the log on
+// the upload host (audit finding L-1).
+type Head struct {
+	Seq  uint64 `json:"seq"`
+	Hash string `json:"hash"`
+}
+
+// Head returns the newest event's sequence number and hash.
+func (l *Log) Head() Head {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return Head{Seq: l.seq, Hash: l.prevHash}
+}
+
 // Append chains, writes and fsyncs one event.
 func (l *Log) Append(e Event) error {
 	l.mu.Lock()

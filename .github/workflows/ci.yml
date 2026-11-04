@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -83,3 +84,93 @@ jobs:
         if: always()
         run: docker logs clamd 2>&1 | tail -60
 
+
+  # Runs the whole hardened stack exactly as compose.yaml ships it (read-only
+  # containers, dropped capabilities, clamd seeing only incoming/ and tmp/)
+  # and pushes files through the proxy: catches hardening that breaks
+  # startup or scanning, which unit tests cannot.
+  stack:
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: prepare host
+        run: |
+          cat > .env <<'ENV'
+          PUBLIC_ORIGIN=https://localhost
+          DIODE_ROOT=/tmp/diode
+          HTTPS_BIND=127.0.0.1
+          MONITORING_BIND=127.0.0.1
+          OVERSIZE_POLICY=hold
+          QUARANTINE_ENABLED=true
+          MAX_FILE_SIZE=50GiB
+          ENV
+          mkdir -p secrets && head -c 48 /dev/urandom | base64 > secrets/csrf_key
+          scripts/dev-cert.sh localhost
+          sudo mkdir -p /tmp/diode/incoming /tmp/diode/quarantine /tmp/diode/tmp /tmp/diode/outbox
+          sudo chown -R 65532:65532 /tmp/diode
+      - name: start
+        run: docker compose up -d --build
+      - name: wait for ready (clamd downloads signatures first)
+        run: |
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:9100/readyz >/dev/null 2>&1; then echo ready; exit 0; fi
+            sleep 10
+          done
+          docker compose ps; exit 1
+      - name: version
+        run: docker compose exec -T app diode-upload version | tee /dev/stderr | grep -q "$(cat VERSION)"
+      - name: clamd sees only incoming/ and tmp/, read-only
+        run: |
+          docker compose exec -T clamd ls /data | sort | tr '\n' ' ' | tee /dev/stderr | grep -qx 'incoming tmp '
+          docker compose exec -T clamd sh -c 'touch /data/incoming/x' && exit 1 || true
+          docker compose exec -T clamd id | tee /dev/stderr | grep -q 65532
+      - name: upload clean and EICAR files through the proxy
+        run: sudo scripts/smoke-test.sh --insecure-tls https://localhost /tmp/diode
+      - name: held file can be listed and released
+        run: |
+          # 20 nested zips exceed clamd's MaxRecursion 17, so it is held.
+          python3 - <<'PY'
+          import io, zipfile
+          data = b"innermost"
+          for i in range(20):
+              buf = io.BytesIO()
+              with zipfile.ZipFile(buf, "w") as z:
+                  z.writestr(f"layer{i}.zip" if i else "inner.txt", data)
+              data = buf.getvalue()
+          open("/tmp/nested.zip", "wb").write(data)
+          PY
+          set -euo pipefail
+          jar=$(mktemp); o=https://localhost
+          csrf=$(curl -sSk -c "$jar" $o/ | sed -n 's/.*name="csrf-token" content="\([0-9a-f]*\)".*/\1/p')
+          h=(-H "Origin: $o" -H "X-CSRF-Token: $csrf")
+          batch=$(curl -sSk -b "$jar" "${h[@]}" -H 'Content-Type: application/json' -d '{"username":"ci","file_count":1}' $o/api/v1/batches | sed -n 's/.*"batch_id":"\([^"]*\)".*/\1/p')
+          meta="batch_id $(printf %s "$batch" | base64 -w0),filename $(printf nested.zip | base64 -w0)"
+          loc=$(curl -sSk -b "$jar" "${h[@]}" -H 'Tus-Resumable: 1.0.0' -H "Upload-Length: $(stat -c %s /tmp/nested.zip)" -H "Upload-Metadata: $meta" -X POST -D - -o /dev/null $o/api/v1/uploads/ | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+          curl -sSk -b "$jar" "${h[@]}" -H 'Tus-Resumable: 1.0.0' -H 'Content-Type: application/offset+octet-stream' -H 'Upload-Offset: 0' -X PATCH --data-binary @/tmp/nested.zip $o$loc
+          id=${loc##*/}
+          for i in $(seq 1 60); do
+            docker compose exec -T app diode-upload held | tee /tmp/held.txt | grep -q "$id.*held" && break
+            sleep 2
+          done
+          cat /tmp/held.txt
+          grep -q "$id.*held" /tmp/held.txt
+          test ! -e /tmp/diode/outbox/nested.zip
+          docker compose exec -T app diode-upload release "$id" --by ci --reason "nested test archive"
+          sudo test -f /tmp/diode/outbox/nested.zip
+          sudo test -f /tmp/diode/outbox/nested.zip.sha256
+          sudo ls /tmp/diode/outbox
+          sudo sh -c "grep -l '\"released_by\": \"ci\"' /tmp/diode/outbox/$batch.*manifest.json"
+      - name: upload creation is rate limited at the proxy
+        run: |
+          codes=$(for i in $(seq 1 60); do curl -sk -o /dev/null -w '%{http_code}\n' -X POST https://localhost/api/v1/uploads/; done | sort | uniq -c)
+          echo "$codes"
+          echo "$codes" | grep -q ' 429$'
+      - name: audit chain verifies
+        run: docker compose exec -T app diode-upload verify-audit
+      - name: logs
+        if: always()
+        run: |
+          docker compose ps
+          docker compose logs --no-color --tail=80 clamd app proxy

@@ -61,6 +61,17 @@ func TestSafeName(t *testing.T) {
 		"CON.txt":        "_CON.txt",
 		"nul":            "_nul",
 		"com1.tar.gz":    "_com1.tar.gz",
+		// Invisible and direction-changing characters (M-2).
+		"invoice\u202efdp.exe": "invoice_fdp.exe",
+		"a\u200bb\u200dc.txt":  "a_b_c.txt",
+		"\ufeffbom.txt":        "_bom.txt",
+		"x\u2066y\u2069.pdf":   "x_y_.pdf",
+		// Reserved endings (M-3).
+		"payroll.xlsx.sha256":                       "payroll.xlsx.sha256_",
+		"PAYROLL.XLSX.SHA256":                       "PAYROLL.XLSX.SHA256_",
+		"20261104T101010Z-bob-abcdef.manifest.json": "20261104T101010Z-bob-abcdef.manifest.json_",
+		"sha256":                  "sha256",
+		"notes.manifest.json.txt": "notes.manifest.json.txt",
 		// Nothing usable left.
 		"":    "file",
 		"...": "file",

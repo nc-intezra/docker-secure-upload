@@ -13,12 +13,17 @@ import (
 	"syscall"
 )
 
-// FileMode is used for every file the service creates. Files must be
-// readable by clamd (another container user) and by the diode.
-const FileMode = 0o644
+// FileMode is used for the service's private files: staging, quarantine,
+// state and audit. clamd reads staging files through the service's group
+// (compose gives it group 65532), so nothing needs to be world-readable.
+const FileMode = 0o640
+
+// PublicFileMode is used for what goes into the outbox, which the diode
+// reads as a different user.
+const PublicFileMode = 0o644
 
 // DirMode is used for every directory the service creates.
-const DirMode = 0o755
+const DirMode = 0o750
 
 // SyncDir fsyncs a directory so that a rename into it survives a crash.
 func SyncDir(dir string) error {
@@ -35,11 +40,16 @@ func SyncDir(dir string) error {
 // destination either does not exist or holds the complete data; it is never
 // seen half-written.
 func WriteAtomic(tmpDir, dest string, data []byte) error {
+	return WriteAtomicMode(tmpDir, dest, data, FileMode)
+}
+
+// WriteAtomicMode is WriteAtomic with an explicit file mode.
+func WriteAtomicMode(tmpDir, dest string, data []byte, mode os.FileMode) error {
 	tmp, err := TempPath(tmpDir)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, FileMode)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
@@ -51,6 +61,10 @@ func WriteAtomic(tmpDir, dest string, data []byte) error {
 		}
 	}()
 	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	// The umask may have removed bits the caller asked for.
+	if err := f.Chmod(mode); err != nil {
 		return err
 	}
 	if err := f.Sync(); err != nil {

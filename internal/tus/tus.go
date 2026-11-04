@@ -33,6 +33,7 @@ import (
 
 	"github.com/nc-intezra/docker-secure-upload/internal/audit"
 	"github.com/nc-intezra/docker-secure-upload/internal/fsutil"
+	"github.com/nc-intezra/docker-secure-upload/internal/limits"
 	"github.com/nc-intezra/docker-secure-upload/internal/names"
 	"github.com/nc-intezra/docker-secure-upload/internal/reqctx"
 	"github.com/nc-intezra/docker-secure-upload/internal/store"
@@ -56,7 +57,8 @@ type Handler struct {
 	MaxFileSize int64
 	ChunkSize   int64
 	DiskReserve int64
-	RejectAbove int64 // refuse uploads larger than this at creation; 0 = no limit
+	RejectAbove int64           // refuse uploads larger than this at creation; 0 = no limit
+	Limits      *limits.Checker // per-session and per-address caps; nil = none
 	Log         *slog.Logger
 	FreeBytes   func(path string) (int64, error) // defaults to fsutil.FreeBytes
 	locks       sync.Map
@@ -257,19 +259,32 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, info reqctx.Inf
 		u.State = store.StateScanning
 		u.CompletedAt = now
 	}
-	u, err = h.Store.CreateUpload(u, func(b *store.Batch, u *store.Upload, seq int) error {
-		if !b.ClosedAt.IsZero() {
-			return errBatchClosed
-		}
-		if b.Created >= b.FileCount {
-			return errBatchFull
-		}
-		u.OutboxName = names.OutboxName(b.ID, seq, u.OriginalName, b.PrefixNames)
-		return nil
-	})
+	createRecord := func() error {
+		u, err = h.Store.CreateUpload(u, func(b *store.Batch, u *store.Upload, seq int) error {
+			if !b.ClosedAt.IsZero() {
+				return errBatchClosed
+			}
+			if b.Created >= b.FileCount {
+				return errBatchFull
+			}
+			u.OutboxName = names.OutboxName(b.ID, seq, u.OriginalName, b.PrefixNames)
+			return nil
+		})
+		return err
+	}
+	if h.Limits != nil && size > 0 {
+		err = h.Limits.Upload(info.SessionHash, info.ClientIP, size, createRecord)
+	} else {
+		err = createRecord()
+	}
 	if err != nil {
 		os.Remove(path)
+		var le *limits.Error
 		switch {
+		case errors.As(err, &le):
+			h.logger().Warn("upload refused: limit", "client_ip", info.ClientIP, "user", b.Username, "reason", le.Msg)
+			w.Header().Set("Retry-After", "60")
+			httpError(w, http.StatusTooManyRequests, le.Msg)
 		case errors.Is(err, errBatchFull), errors.Is(err, errBatchClosed):
 			httpError(w, http.StatusConflict, err.Error())
 		default:
