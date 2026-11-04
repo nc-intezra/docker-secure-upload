@@ -19,9 +19,10 @@ const DefaultInstructions = `# How to send files across
 
 - Every file is checked for viruses before it is passed on.
 - Files that fail the check are blocked and do not cross. An administrator can review them.
-- Very large files (over about 4 GB) cannot be fully scanned. They are passed on and marked as not fully scanned.
+- Very large files (over about 4 GB) cannot be fully scanned. They are held until an administrator checks and releases them, so allow extra time and tell the administrator when you send one.
 - Characters that are not allowed in file names on Windows or Linux (such as ? * : < > | and quotes) are replaced with _. The page shows the new name when this happens.
 - If a file with the same name is still waiting to cross, yours waits until it has gone, so nothing is overwritten.
+- If you send a lot at once, some files may show "Waiting for your earlier uploads to finish". They start on their own; keep the page open.
 `
 
 // LoadInstructions reads path, falling back to DefaultInstructions.

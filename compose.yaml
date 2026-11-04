@@ -93,18 +93,14 @@ services:
     pids_limit: 256
 
   clamd:
-    # The image's entrypoint starts as root: it chowns the signature volume
-    # (CHOWN) and freshclam drops to the clamav user (SETUID, SETGID).
-    # Nothing else is granted. clamd itself stays root inside the container
-    # but without DAC_OVERRIDE, so it reads uploads only through group 65532,
-    # and only incoming/ and tmp/, read-only. It never sees the outbox,
-    # quarantine/ or the service's state.
+    # Runs entirely as the image's clamav user through its unprivileged
+    # entrypoint, with every capability dropped and a read-only root. It
+    # reads uploads through group 65532, and mounts only incoming/ and tmp/,
+    # read-only: it never sees the outbox, quarantine/ or the service state.
     <<: *hardening
     image: clamav/clamav:stable # pin by digest in production
-    cap_add:
-      - CHOWN
-      - SETUID
-      - SETGID
+    user: clamav
+    entrypoint: ["/init-unprivileged"]
     group_add:
       - "65532"
     volumes:
@@ -114,10 +110,7 @@ services:
       - ./deploy/clamd/freshclam.conf:/etc/clamav/freshclam.conf:ro
       - clamdb:/var/lib/clamav
     tmpfs:
-      - /tmp
-      - /run/clamav
-      - /run/lock
-      - /var/log/clamav
+      - /tmp # clamd's socket and scratch files
     networks:
       - scan
       - updates # remove if signatures come from an internal mirror on the scan network

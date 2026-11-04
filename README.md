@@ -20,11 +20,11 @@ Design spec: [Diode Upload Service: v1 design spec](https://claude.ai/artifact/N
 browser ──TLS──▶ nginx ──▶ upload-api (Go) ──▶ /data/incoming/<id>
                                  │                    │
                                  │   zSCAN by path    ▼
-                                 └────────────▶ clamd (read-only /data)
+                                 └────────────▶ clamd (read-only incoming/ and tmp/ only)
                                                       │
           passed / unscanned ──▶ /data/outbox/  ◀─────┘   (atomic rename + .sha256 + batch manifest)
           infected           ──▶ /data/quarantine/ (or deleted when quarantine is off)
-          scan error / limit ──▶ /data/quarantine/ (held)
+          scan error / limit ──▶ /data/quarantine/ (held) ──operator release──▶ /data/outbox/
 ```
 
 1. The page loads with a session cookie (`__Host-sid`) and a CSRF token.
@@ -47,11 +47,16 @@ browser ──TLS──▶ nginx ──▶ upload-api (Go) ──▶ /data/incom
 | Scan result | End state | Where the file goes |
 | --- | --- | --- |
 | `OK`, file at or under `CLAMD_MAX_SCAN_SIZE` | passed | outbox |
-| `OK` but file larger than `CLAMD_MAX_SCAN_SIZE` | unscanned (policy `pass`) or held | outbox, flagged in the manifest |
-| `Heuristics.Limits.Exceeded.MaxFileSize` / `.MaxScanSize` | unscanned (policy `pass`) or held | outbox, flagged in the manifest |
+| `OK` but file larger than `CLAMD_MAX_SCAN_SIZE` | held (policy `hold`, the default) or unscanned (policy `pass`) | quarantine/ until released, or outbox flagged in the manifest |
+| `Heuristics.Limits.Exceeded.MaxFileSize` / `.MaxScanSize` | held (policy `hold`) or unscanned (policy `pass`) | quarantine/ until released, or outbox flagged in the manifest |
 | `Heuristics.Limits.Exceeded.MaxRecursion` / `.MaxFiles` / `.MaxScanTime` | held | quarantine/ |
 | any other `FOUND` (including `Heuristics.Encrypted.*`) | quarantined, or deleted if `QUARANTINE_ENABLED=false` | quarantine/ or removed |
 | `ERROR`, timeout, unexpected reply | held | quarantine/ |
+
+ClamAV cannot scan files over about 4 GB. With the default
+`OVERSIZE_POLICY=hold`, such files never reach the outbox until an operator
+releases them (see [Held files](#held-files)). Held files can be released;
+infected (quarantined) files cannot.
 
 The service never scans until clamd has passed an EICAR self-test, which is
 repeated hourly. If clamd is unreachable, files wait in the queue instead of
@@ -79,7 +84,12 @@ Names are changed only where they must be:
 - characters illegal on Linux or Windows (control characters and `< > : " / \ | ? *`) become `_`
 - leading dots and spaces, trailing dots and spaces, are removed
 - Windows device names (`CON`, `NUL`, `COM1` ...) get a leading `_`
+- invisible and direction-changing Unicode characters (format characters
+  such as the right-to-left override, zero-width spaces and the byte-order
+  mark) become `_`, so `invoice<RLO>fdp.exe` cannot pass for a PDF
 - names over 180 bytes are shortened, keeping the extension
+- names ending in `.sha256` or `.manifest.json` get a trailing `_`, so an
+  upload can never pass for a sidecar or manifest the service wrote
 
 Spaces, accented and non-Latin letters, brackets and other punctuation are
 kept, so scripts on the receiving side must quote file names.
@@ -92,8 +102,16 @@ file is held instead. The receiving side decides what happens when a second
 file with the same name arrives there.
 
 The manifest lists every passed file with its outbox name, original name,
-size, SHA-256, `scan_status` (`clean` or `unscanned`) and signature database.
-Withheld files are only counted; their names never cross the diode.
+size, SHA-256, `scan_status` (`clean`, `unscanned` or `released`) and
+signature database. Withheld files are only counted; their names never
+cross the diode. `audit_head` holds the sequence number and hash of the
+newest audit event when the manifest was written: keep manifests on the
+receiving side and a later rewrite of the upload host's audit log can be
+detected.
+
+A file released after its batch manifest has already gone gets a manifest of
+its own, `<batch>.release-<id>.manifest.json`, with a `release` block saying
+who released it, why, and why it was held.
 
 ## Prerequisites
 
@@ -151,20 +169,27 @@ filesystem** so moves are atomic. The service refuses to start otherwise,
 and also refuses if a staging folder is inside the outbox.
 
 ```
-/srv/diode-upload/          # DIODE_ROOT, mounted at /data
+/srv/diode-upload/          # DIODE_ROOT, mounted at /data in the app
   outbox/                   # the folder the diode watches (2-second settle time)
-  incoming/                 # created by the service
-  quarantine/               # created by the service
-  tmp/                      # created by the service, emptied at startup
+  incoming/                 # files being received and scanned (clamd reads these)
+  quarantine/               # held and infected files
+  tmp/                      # scratch space, emptied at startup (clamd reads these)
 ```
 
+Create all four before the first start. clamd mounts `incoming/` and `tmp/`
+directly; if they do not exist Docker creates them owned by root and the app
+cannot write to them.
+
 ```sh
-sudo install -d -m 0755 -o 65532 -g 65532 /srv/diode-upload
+sudo install -d -m 0750 -o 65532 -g 65532 /srv/diode-upload \
+     /srv/diode-upload/incoming /srv/diode-upload/quarantine /srv/diode-upload/tmp
 sudo install -d -m 2775 -o 65532 -g <diode-group> /srv/diode-upload/outbox
 ```
 
-The app runs as uid 65532. Files are created mode 0644 so clamd and the
-diode can read them; the diode needs write access to `outbox/` to remove
+The app runs as uid 65532. Staging and quarantine files are mode 0640 and
+their folders 0750: clamd reads them through group 65532, and nothing else
+on the host can. Files, sidecars and manifests in `outbox/` are mode 0644 so
+the diode can read them; the diode needs write access to `outbox/` to remove
 what it has collected.
 
 ## Running
@@ -187,8 +212,63 @@ Useful commands:
 
 ```sh
 curl -s http://127.0.0.1:9100/readyz                   # 200 once clamd is proven and disk is above reserve
+docker compose exec app diode-upload version           # running version
 docker compose exec app diode-upload verify-audit      # check the audit hash chain
+sudo scripts/smoke-test.sh https://upload.example.internal /srv/diode-upload
+                                                       # send a clean file and EICAR end to end
 ```
+
+`smoke-test.sh` leaves one small `smoke-*.txt` file, its `.sha256` and its
+manifest in the outbox. Add `--insecure-tls` before the address when testing
+with a self-signed certificate.
+
+## Held files
+
+A file is held when clamd could not give a clear answer: it is too large to
+scan (with `OVERSIZE_POLICY=hold`), an archive exceeds the nesting or
+file-count limits, or the scan failed. Held files wait in `quarantine/`
+and the sender's page shows "Held for administrator review". Until the admin
+site arrives, operators handle them from the host:
+
+```sh
+docker compose exec app diode-upload held
+#   ID                                STATE        USER    SIZE         RECEIVED           NAME         REASON
+#   3f1c...                           held         jsmith  6442450944   2026-11-04 10:12Z  backup.tar   file is larger than ClamAV can scan ...
+
+docker compose exec app diode-upload release 3f1c... --by "A. Admin" --reason "vendor image, checked with offline AV"
+docker compose exec app diode-upload delete  3f1c... --by "A. Admin" --reason "sender asked to drop it"
+```
+
+- `release` reads the file again and refuses if its SHA-256 no longer
+  matches what the user sent. It then moves the file to the outbox under
+  the name it would have had, with its `.sha256`. If the batch manifest has
+  already gone, a release manifest follows.
+- Infected (`quarantined`) files can only be deleted, never released.
+- `--by` and `--reason` are required and recorded in the audit log
+  (`upload.released`, `upload.discarded`).
+- The commands talk to the running service over a unix socket inside the
+  app container (`/tmp/diode-upload.sock`, mode 0600, only accepted from the
+  service's own user), so they need Docker access on the host and nothing is
+  exposed on the network.
+
+## Limits
+
+To stop one client tying up the staging disk, the service caps what a
+browser session, and a client address across all its sessions, may have in
+progress at once:
+
+| | Per session | Per address |
+| --- | --- | --- |
+| Batches not yet finished | 10 | 30 |
+| Files still uploading | 20 | 60 |
+| Bytes still to arrive | 100 GiB (2 × `MAX_FILE_SIZE`) | 300 GiB |
+
+A request over a cap gets `429 Too Many Requests`. The upload page waits and
+retries on its own ("Waiting for your earlier uploads to finish"). An upload
+that receives nothing for `UPLOAD_EXPIRY` (1 hour) is dropped, and a batch
+with no uploads is deleted after the same time. nginx also limits upload
+creation to 2 per second per address (burst 20). If many users share one
+address (a terminal server or NAT), raise the `IP_MAX_*` settings.
 
 ## Troubleshooting
 
@@ -199,6 +279,9 @@ docker compose exec app diode-upload verify-audit      # check the audit hash ch
 | Upload page says `Could not start: request did not come from this site` | `PUBLIC_ORIGIN` does not exactly match the address in the browser (scheme, host name and port all count). `docker compose logs app \| grep "request rejected"` shows the `origin` the browser sent next to `expected_origin`. In the browser's developer console, `location.origin` prints the value to use. Set `PUBLIC_ORIGIN` to it in `.env` (no trailing slash), run `docker compose up -d app`, then reload the page. Users must all use that one address. |
 | Upload page says `reload the page and try again` | The page's session cookie or CSRF token is missing or no longer valid, for example because `secrets/csrf_key` was changed while the page was open, or the browser blocked the cookie. Reload the page. The log line `request rejected` shows `reason` `no_session` or `bad_csrf`. |
 | `storage layout: ... permission denied` or `outbox: ... no such file or directory` | `DIODE_ROOT` or its `outbox/` is missing or not writable by uid 65532. See [Host layout](#host-layout). |
+| `storage layout: ... (the folder must belong to uid 65532)` | `incoming/`, `quarantine/` or `tmp/` under `DIODE_ROOT` was created by Docker or by root. `sudo chown 65532:65532 "$DIODE_ROOT"/{incoming,quarantine,tmp}`, then `docker compose up -d`. |
+| A file shows "Waiting for your earlier uploads to finish" | A [limit](#limits) is reached for that browser or computer. It starts by itself when earlier uploads finish. `docker compose logs app \| grep "refused: limit"` shows which cap. |
+| A file shows "Held for administrator review" | See [Held files](#held-files). |
 | Uploads stay at "Scanning" for a long time after the first start | clamd is still downloading signatures. `docker compose logs -f clamd`; scanning starts after the app logs `clamd self-test passed`. |
 
 ## Configuration
@@ -211,14 +294,17 @@ docker compose exec app diode-upload verify-audit      # check the audit hash ch
 | `MAX_FILE_SIZE` | `50GiB` | |
 | `CHUNK_SIZE` | `64MiB` | nginx `client_max_body_size` for the uploads path must be this + 1 MiB |
 | `DISK_RESERVE` | `10GiB` | Free space kept beyond all unfinished uploads |
-| `UPLOAD_EXPIRY` | `24h` | Unfinished uploads are removed after this |
+| `UPLOAD_EXPIRY` | `1h` | An upload that receives nothing for this long is dropped; so is a batch with no activity |
 | `CLAMD_ADDR` | `clamd:3310` | |
 | `CLAMD_PATH_PREFIX` | `$DATA_DIR` | Where clamd sees `DATA_DIR` (for an external clamd) |
 | `CLAMD_MAX_SCAN_SIZE` | `4000M` | Must match `MaxScanSize` in `clamd.conf` |
 | `SCAN_CONCURRENCY` / `SCAN_TIMEOUT` | `2` / `2h` | |
-| `OVERSIZE_POLICY` | `pass` | `pass`, `hold` or `reject` (refused at upload) |
+| `OVERSIZE_POLICY` | `hold` | `hold` (operator releases), `pass` (sent flagged unscanned) or `reject` (refused at upload) |
 | `QUARANTINE_ENABLED` | `true` | `false` deletes infected files instead |
 | `MAX_BATCH_FILES` | `500` | |
+| `SESSION_MAX_OPEN_BATCHES` / `_OPEN_UPLOADS` / `_RESERVED` | `10` / `20` / 2 × `MAX_FILE_SIZE` | Per browser session, see [Limits](#limits); `0` = no cap |
+| `IP_MAX_OPEN_BATCHES` / `_OPEN_UPLOADS` / `_RESERVED` | 3 × the session values | Per client address |
+| `CONTROL_SOCKET` | `/tmp/diode-upload.sock` | Socket for the held-file commands; `off` disables them |
 | `INSTRUCTIONS_FILE` | `/config/instructions.md` | Headings, lists, paragraphs and `**bold**`; everything is HTML-escaped |
 | `CSRF_KEY_FILE` | `/run/secrets/csrf_key` | At least 32 bytes |
 | `HEALTH_ADDR` | `0.0.0.0:9100` | `/healthz`, `/readyz` (metrics join in stage 3) |
@@ -238,21 +324,30 @@ docker compose exec app diode-upload verify-audit      # check the audit hash ch
   Windows, see [Outbox format](#outbox-format));
   tus metadata keys are whitelisted; no shell, no SQL; the page uses no
   `innerHTML` and runs under a strict CSP with Trusted Types.
-- **Containers:** non-root, read-only root filesystem, `cap_drop: ALL`
-  (except clamd, whose image needs to drop privileges itself),
-  `no-new-privileges`, internal networks for app↔clamd and proxy↔app.
+- **Containers:** read-only root filesystem, `cap_drop: ALL` with nothing
+  added back, `no-new-privileges`, non-root users, memory, CPU and process
+  limits, rotated logs, and internal networks for app↔clamd and proxy↔app.
+  clamd runs as the image's `clamav` user through its unprivileged
+  entrypoint, reads uploads through group 65532, and mounts only
+  `incoming/` and `tmp/`, read-only.
+- **Limits:** per-session and per-address caps on work in progress (see
+  [Limits](#limits)) and rate limits at the proxy.
 
 ## Known limits of stage 1
 
-- No rate limiting in the app yet; nginx applies a coarse per-IP limit.
-- No admin site yet: quarantined and held files can only be handled on the
-  host (`/data/quarantine/<id>`, details in `/state/uploads/<id>.json`).
+- No authentication yet: anyone who can reach the page can upload. Restrict
+  port 443 to approved client subnets with the host firewall.
+- No admin site yet: held files are handled with the commands in
+  [Held files](#held-files).
 - No audit or quarantine retention pruning yet.
 - If a browser declares more files than it ever creates (for example the page
-  is closed early), the batch manifest is written once the batch is 24 hours
-  old, with `missing_count` set. Files themselves cross as soon as they pass.
+  is closed early), the batch manifest is written once nothing has happened
+  in the batch for `UPLOAD_EXPIRY`, with `missing_count` set. Files
+  themselves cross as soon as they pass.
 
 ## Development
+
+Go 1.27 or later.
 
 ```sh
 go test -race ./...        # unit tests + end-to-end tests against a fake clamd

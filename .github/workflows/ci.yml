@@ -125,7 +125,14 @@ jobs:
         run: |
           docker compose exec -T clamd ls /data | sort | tr '\n' ' ' | tee /dev/stderr | grep -qx 'incoming tmp '
           docker compose exec -T clamd sh -c 'touch /data/incoming/x' && exit 1 || true
-          docker compose exec -T clamd id | tee /dev/stderr | grep -q 65532
+          docker compose exec -T clamd id | tee /dev/stderr | grep -E '^uid=100\(clamav\).*65532'
+          docker compose exec -T clamd sh -c 'grep CapEff /proc/1/status' | tee /dev/stderr | grep -q '0000000000000000'
+      - name: freshclam and clamd started without errors
+        run: |
+          docker compose logs --no-color clamd > /tmp/clamd.log
+          # Permission problems only; a busy update mirror is not a failure here.
+          ! grep -Ei "can't create|failed to save|init failed|initialization error|permission denied|read-only file system" /tmp/clamd.log
+          docker compose exec -T clamd pgrep -x freshclam
       - name: upload clean and EICAR files through the proxy
         run: sudo scripts/smoke-test.sh --insecure-tls https://localhost /tmp/diode
       - name: held file can be listed and released
