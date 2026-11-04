@@ -57,10 +57,10 @@ services:
       OUTBOX_DIR: /data/outbox
       STATE_DIR: /state
       CLAMD_ADDR: clamd:3310
-      CLAMD_MAX_SCAN_SIZE: 4000M # must match MaxScanSize in deploy/clamd/clamd.conf
+      CLAMD_MAX_SCAN_SIZE: 2047M # must match MaxFileSize in deploy/clamd/clamd.conf
       CSRF_KEY_FILE: /run/secrets/csrf_key
       HEALTH_ADDR: 0.0.0.0:9100
-      # hold: files too large for clamd to scan (over 4000 MiB) wait for an
+      # hold: files too large for clamd to scan (over 2047 MiB) wait for an
       # operator (README "Held files"). pass sends them flagged unscanned.
       OVERSIZE_POLICY: ${OVERSIZE_POLICY:-hold}
       QUARANTINE_ENABLED: ${QUARANTINE_ENABLED:-true}

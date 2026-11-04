@@ -53,7 +53,7 @@ browser ──TLS──▶ nginx ──▶ upload-api (Go) ──▶ /data/incom
 | any other `FOUND` (including `Heuristics.Encrypted.*`) | quarantined, or deleted if `QUARANTINE_ENABLED=false` | quarantine/ or removed |
 | `ERROR`, timeout, unexpected reply | held | quarantine/ |
 
-ClamAV cannot scan files over about 4 GB. With the default
+ClamAV cannot scan a single file over 2 GiB (2047 MiB here). With the default
 `OVERSIZE_POLICY=hold`, such files never reach the outbox until an operator
 releases them (see [Held files](#held-files)). Held files can be released;
 infected (quarantined) files cannot.
@@ -297,7 +297,7 @@ address (a terminal server or NAT), raise the `IP_MAX_*` settings.
 | `UPLOAD_EXPIRY` | `1h` | An upload that receives nothing for this long is dropped; so is a batch with no activity |
 | `CLAMD_ADDR` | `clamd:3310` | |
 | `CLAMD_PATH_PREFIX` | `$DATA_DIR` | Where clamd sees `DATA_DIR` (for an external clamd) |
-| `CLAMD_MAX_SCAN_SIZE` | `4000M` | Must match `MaxScanSize` in `clamd.conf` |
+| `CLAMD_MAX_SCAN_SIZE` | `2047M` | Largest file clamd fully scans; must match `MaxFileSize` in `clamd.conf` (libclamav's limit is 2 GiB) |
 | `SCAN_CONCURRENCY` / `SCAN_TIMEOUT` | `2` / `2h` | |
 | `OVERSIZE_POLICY` | `hold` | `hold` (operator releases), `pass` (sent flagged unscanned) or `reject` (refused at upload) |
 | `QUARANTINE_ENABLED` | `true` | `false` deletes infected files instead |

@@ -43,7 +43,7 @@ type Config struct {
 	UploadExpiry      time.Duration
 	ClamdAddr         string
 	ClamdPathPrefix   string // DataDir as seen by clamd (defaults to DataDir)
-	ClamdMaxScanSize  int64  // must match clamd.conf MaxScanSize
+	ClamdMaxScanSize  int64  // largest file clamd fully scans; must match clamd.conf MaxFileSize
 	ScanConcurrency   int
 	ScanTimeout       time.Duration
 	OversizePolicy    OversizePolicy
@@ -96,7 +96,7 @@ func Load() (*Config, error) {
 	add(err)
 	c.DiskReserve, err = sizeEnv("DISK_RESERVE", 10<<30)
 	add(err)
-	c.ClamdMaxScanSize, err = sizeEnv("CLAMD_MAX_SCAN_SIZE", 4000<<20)
+	c.ClamdMaxScanSize, err = sizeEnv("CLAMD_MAX_SCAN_SIZE", 2047<<20)
 	add(err)
 	c.UploadExpiry, err = durEnv("UPLOAD_EXPIRY", time.Hour)
 	add(err)

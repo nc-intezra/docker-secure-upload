@@ -169,6 +169,32 @@ jobs:
           sudo test -f /tmp/diode/outbox/nested.zip.sha256
           sudo ls /tmp/diode/outbox
           sudo sh -c "grep -l '\"released_by\": \"ci\"' /tmp/diode/outbox/$batch.*manifest.json"
+      - name: a file over 2 GiB is held, not delivered (OVERSIZE_POLICY=hold)
+        run: |
+          set -euo pipefail
+          truncate -s 2100M /tmp/big.bin
+          jar=$(mktemp); o=https://localhost; size=$(stat -c %s /tmp/big.bin)
+          csrf=$(curl -sSk -c "$jar" $o/ | sed -n 's/.*name="csrf-token" content="\([0-9a-f]*\)".*/\1/p')
+          h=(-H "Origin: $o" -H "X-CSRF-Token: $csrf" -H 'Tus-Resumable: 1.0.0')
+          batch=$(curl -sSk -b "$jar" "${h[@]}" -H 'Content-Type: application/json' -d '{"username":"ci","file_count":1}' $o/api/v1/batches | sed -n 's/.*"batch_id":"\([^"]*\)".*/\1/p')
+          meta="batch_id $(printf %s "$batch" | base64 -w0),filename $(printf big.bin | base64 -w0)"
+          loc=$(curl -sSk -b "$jar" "${h[@]}" -H "Upload-Length: $size" -H "Upload-Metadata: $meta" -X POST -D - -o /dev/null $o/api/v1/uploads/ | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+          off=0; i=0
+          while [ "$off" -lt "$size" ]; do
+            dd if=/tmp/big.bin bs=64M skip=$i count=1 status=none |
+              curl -sSk -b "$jar" "${h[@]}" -H 'Content-Type: application/offset+octet-stream' -H "Upload-Offset: $off" \
+                -X PATCH --data-binary @- -o /dev/null -w '%{http_code} ' $o$loc
+            i=$((i+1)); off=$(( i * 64 * 1024 * 1024 < size ? i * 64 * 1024 * 1024 : size ))
+          done
+          echo; id=${loc##*/}
+          for i in $(seq 1 60); do
+            docker compose exec -T app diode-upload held | grep -q "$id.*held" && break
+            sleep 2
+          done
+          docker compose exec -T app diode-upload held | tee /dev/stderr | grep -q "$id.*held"
+          test ! -e /tmp/diode/outbox/big.bin
+          sudo grep -h '"withheld_count": 1' /tmp/diode/outbox/$batch.manifest.json
+          sudo rm -f /tmp/diode/quarantine/$id
       - name: upload creation is rate limited at the proxy
         run: |
           codes=$(for i in $(seq 1 60); do curl -sk -o /dev/null -w '%{http_code}\n' -X POST https://localhost/api/v1/uploads/; done | sort | uniq -c)

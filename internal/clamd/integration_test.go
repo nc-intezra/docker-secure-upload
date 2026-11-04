@@ -58,6 +58,22 @@ func TestRealClamd(t *testing.T) {
 		t.Errorf("EICAR not detected: %+v", r)
 	}
 
+	// libclamav scans at most 2 GiB - 1 byte of a single file. Files between
+	// that and the old 4000M setting must be flagged too, not answered OK.
+	g, err := os.Create(filepath.Join(hostDir, "mid.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Truncate(3000 << 20); err != nil {
+		t.Fatal(err)
+	}
+	g.Close()
+	defer os.Remove(g.Name())
+	if r, err := c.Scan(ctx, filepath.Join(seenAs, "mid.bin")); err != nil || r.Verdict != VerdictFound ||
+		!strings.HasPrefix(r.Signature, "Heuristics.Limits.Exceeded.") {
+		t.Errorf("3000 MiB file not flagged: %+v %v", r, err)
+	}
+
 	// A sparse file just over the 4000M limit must be reported as exceeding
 	// it (AlertExceedsMax), never as OK.
 	big := filepath.Join(hostDir, "big.bin")
