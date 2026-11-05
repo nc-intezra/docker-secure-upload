@@ -194,7 +194,9 @@ jobs:
           docker compose exec -T app diode-upload held | tee /dev/stderr | grep -q "$id.*held"
           test ! -e /tmp/diode/outbox/big.bin
           sudo grep -h '"withheld_count": 1' /tmp/diode/outbox/$batch.manifest.json
-          sudo rm -f /tmp/diode/quarantine/$id
+          docker compose exec -T app diode-upload release "$id" --by ci --reason "large file test"
+          sudo cmp /tmp/big.bin /tmp/diode/outbox/big.bin
+          sudo test -f /tmp/diode/outbox/big.bin.sha256
       - name: upload creation is rate limited at the proxy
         run: |
           codes=$(for i in $(seq 1 60); do curl -sk -o /dev/null -w '%{http_code}\n' -X POST https://localhost/api/v1/uploads/; done | sort | uniq -c)
