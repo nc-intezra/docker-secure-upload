@@ -71,7 +71,7 @@ This document records what the Diode Upload Service and each party it connects t
 
 Revision 0.3 describes stage 1 as built in v0.5.3-beta. Stage 1 covers the upload site, resumable uploads, SHA-256, ClamAV scanning, the outbox handoff, held-file operator commands and the audit log. Interfaces or parts of interfaces that are designed but not built are marked **Planned** wherever they appear.
 
-There are no recorded disagreements between parties. Section 4 lists 24 open items: decisions needed from a counterparty, differences between the README and the code (the code is stated in this document), and known security items. The two security items that most affect deployment are:
+There are no recorded disagreements between parties. Section 4 lists 23 open items: decisions needed from a counterparty, differences between the README and the code (the code is stated in this document), and known security items. The two security items that most affect deployment are:
 
 - **No authentication (audit H-1).** Anyone who can reach port 443 can upload. Until login arrives with stage 2, the host firewall must restrict port 443 to approved client subnets.
 - **Images not pinned by digest (audit M-6).** `compose.yaml` and the `Dockerfile` use tags (`nginxinc/nginx-unprivileged:stable-alpine`, `clamav/clamav:stable`, `golang:1.27-bookworm`, `gcr.io/distroless/static-debian12:nonroot`). Production must pin digests.
@@ -539,7 +539,7 @@ Fields have been added within `schema: 1` (`audit_head` in v0.5.3-beta), so rece
 | Records `unscanned` and `released` in the manifest | Decide how to treat `unscanned` and `released` files (open item 9) and same-named arrivals (open item 7) |
 | Keeps the sender's name unless the sender opts in to the prefix | Quote file names; treat `original_name` as untrusted text |
 
-**If the diode stops collecting** — files build up on the shared filesystem; new uploads get 507 once free space would drop below `DISK_RESERVE`; same-named files are held after 1 h. Nothing reports the backlog today (open item 23).
+**If the diode stops collecting** — files build up on the shared filesystem; new uploads get 507 once free space would drop below `DISK_RESERVE`; same-named files are held after 1 h. Nothing reports the backlog today (open item 22).
 
 **Security** — the outbox is the only path across the diode, so only the app writes to it; clamd cannot see it; the diode account needs read on files and write on the folder only.
 
@@ -597,7 +597,7 @@ Monitoring polls two plain-HTTP endpoints on port 9100; `/metrics` is designed f
 | Docker health check | `diode-upload healthcheck` (IF-05): interval 30 s, timeout 5 s, start period 10 min, 3 retries |
 | `GET /metrics` | **Planned (stage 3), not built.** Designed as Prometheus text format (Zabbix: HTTP agent with Prometheus pattern preprocessing), optional bearer token. Any other path answers 404 today |
 
-**Suggested checks** — alert when `/readyz` is not 200 for 5 min. `/readyz` does not cover outbox backlog, signature age, held-file count or audit-chain health (open item 23); until `/metrics` exists, check those on the host (`held`, `verify-audit`, age of the oldest file in `outbox/`).
+**Suggested checks** — alert when `/readyz` is not 200 for 5 min. `/readyz` does not cover outbox backlog, signature age, held-file count or audit-chain health (open item 22); until `/metrics` exists, check those on the host (`held`, `verify-audit`, age of the oldest file in `outbox/`).
 
 **Security** — bind 9100 only to the monitoring interface; the endpoints reveal readiness only.
 
@@ -618,9 +618,9 @@ freshclam, inside the clamd container, pulls ClamAV signature updates from the p
 | Reload | `NotifyClamd /etc/clamav/clamd.conf`; clamd reloads with `ConcurrentDatabaseReload yes` and also checks every 600 s (`SelfCheck`) |
 | Logging | No `UpdateLogFile`; freshclam runs with `--stdout`, log rotated with the container |
 | First start | Signatures download before clamd is healthy; the app does not scan until the EICAR self-test passes (IF-03) and its health check allows a 10 min start period |
-| Effect of failure | clamd keeps scanning with the last database; scanning is not paused. The version in use is recorded per file (`clamav_db`). No signature-age alert exists until `/metrics` (open item 23) |
+| Effect of failure | clamd keeps scanning with the last database; scanning is not paused. The version in use is recorded per file (`clamav_db`). No signature-age alert exists until `/metrics` (open item 22) |
 | Internal mirror (supported by configuration) | Point `DatabaseMirror` (or `PrivateMirror`) in `deploy/clamd/freshclam.conf` at a mirror on the `scan` network and remove `updates` from the clamd service in `compose.yaml` (comment in compose) |
-| Offline bundle (sneakernet) | **Planned, not built.** No procedure, file format or tooling is in the repository (open item 24) |
+| Offline bundle (sneakernet) | **Planned, not built.** No procedure, file format or tooling is in the repository (open item 23) |
 
 **Security** — egress from `updates` should be restricted at the host or network firewall to the mirror; the database volume is writable only by `clamav`.
 
@@ -703,7 +703,7 @@ All records are loaded into memory at start. A crash between a decision and a fi
 
 **Sensitivity** — the audit log and records hold usernames, client IP addresses, original file names, hashes and signature names; restrict to host administrators.
 
-**Retention** — **not implemented.** Audit files, records and `quarantine/` grow without limit; pruning (designed as 90 days with a chain checkpoint) is Planned for stage 2 (open item 22). Container logs: json-file, 5 × 50 MB per container.
+**Retention** — **not implemented.** Audit files, records and `quarantine/` grow without limit; pruning (designed as 90 days with a chain checkpoint) is Planned for stage 2 (open item 21). Container logs: json-file, 5 × 50 MB per container.
 
 **Host prerequisites** — Docker Engine and the Compose v2 plugin from Docker's apt repository (not the Ubuntu snap); at least 4 cores and 6 GB RAM (limits: proxy 256 MB/1 CPU/256 pids, app 512 MB/2 CPUs/256 pids, clamd 4 GB/2 CPUs/512 pids); `secrets/csrf_key` at least 32 bytes after trimming (`head -c 48 /dev/urandom | base64`), mode 600, mounted at `/run/secrets/csrf_key`; `deploy/tls/upload.crt` and `upload.key` readable by uid 101; `config/instructions.md` mounted read-only (built-in text if empty).
 
@@ -836,7 +836,6 @@ Conditions for revision 1.0:
 | 18 | Discrepancy | The header comment of `deploy/clamd/clamd.conf` says `CLAMD_MAX_SCAN_SIZE` must match `MaxScanSize` (4000M); `config.go`, `compose.yaml`, the README and the later comment in the same file say `MaxFileSize` (2047M) | IF-03 | Code: `MaxFileSize` 2047M | Service owner (fix comment) |
 | 19 | Discrepancy | README states the app trusts `X-Real-IP` only from the proxy; this is true in code but no automated test covers it | IF-02 | Inspected only | Service owner (add test) |
 | 20 | Discrepancy | README drift: configuration table omits `LISTEN_ADDR` (`:8080`); Status table still says stage 1 "this commit" and lists rate limiting under stage 3 although caps shipped in v0.5.3-beta; held-file example reason differs from the code text (`file is <n> bytes, larger than the scanner limit of <n> bytes`); the manifest struct comment lists \`clean | unscanned`without`released\` | IF-01, IF-04, IF-05 | Code as stated in this ICD |
-| 21 | Discrepancy | Only `v0.5.0-beta` and `v0.5.1-beta` are git tags; v0.5.2-beta and v0.5.3-beta exist as `VERSION` and release notes only, and `main` has 3 CI commits after the v0.5.3-beta notes | All | This ICD baselines commit `eba3ef1` | Service owner (tag the release) |
-| 22 | Planned | Retention: no pruning of the audit log, records or `quarantine/` (designed: 90 days with a chain checkpoint) | IF-08 | Grows without limit; operators can delete held/quarantined files | Service owner (stage 2) |
-| 23 | Planned | `/metrics` not built: no signal for outbox backlog, oldest outbox file, signature age, held count or scan queue | IF-06, IF-04, IF-07 | `/healthz`, `/readyz` only | Service owner (stage 3); monitoring owner |
-| 24 | Planned | Offline (sneakernet) signature bundle for sites without egress is not described in the repository | IF-07 | Public mirror over `updates`, or a site mirror by editing `freshclam.conf` | Service owner; infrastructure owner |
+| 21 | Planned | Retention: no pruning of the audit log, records or `quarantine/` (designed: 90 days with a chain checkpoint) | IF-08 | Grows without limit; operators can delete held/quarantined files | Service owner (stage 2) |
+| 22 | Planned | `/metrics` not built: no signal for outbox backlog, oldest outbox file, signature age, held count or scan queue | IF-06, IF-04, IF-07 | `/healthz`, `/readyz` only | Service owner (stage 3); monitoring owner |
+| 23 | Planned | Offline (sneakernet) signature bundle for sites without egress is not described in the repository | IF-07 | Public mirror over `updates`, or a site mirror by editing `freshclam.conf` | Service owner; infrastructure owner |
