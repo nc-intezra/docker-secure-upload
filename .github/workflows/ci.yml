@@ -197,6 +197,16 @@ jobs:
           docker compose exec -T app diode-upload release "$id" --by ci --reason "large file test"
           sudo cmp /tmp/big.bin /tmp/diode/outbox/big.bin
           sudo test -f /tmp/diode/outbox/big.bin.sha256
+      - name: a 2100 MiB file sent from a real browser is held, then released intact
+        run: |
+          set -euo pipefail
+          cd scripts/ci && npm install --no-save --silent playwright && npx playwright install --with-deps chromium >/dev/null
+          head -c 2100M /dev/urandom > /tmp/browser-big.bin
+          node browser-upload.mjs https://localhost /tmp/browser-big.bin "Held for administrator review"
+          id=$(docker compose exec -T app diode-upload held | awk '/browser-big.bin/ && / held /{print $1}')
+          test -n "$id"
+          docker compose exec -T app diode-upload release "$id" --by ci --reason "browser large file test"
+          sudo cmp /tmp/browser-big.bin /tmp/diode/outbox/browser-big.bin
       - name: upload creation is rate limited at the proxy
         run: |
           codes=$(for i in $(seq 1 60); do curl -sk -o /dev/null -w '%{http_code}\n' -X POST https://localhost/api/v1/uploads/; done | sort | uniq -c)
