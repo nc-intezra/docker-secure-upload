@@ -14,6 +14,11 @@ Design spec: [Diode Upload Service: v1 design spec](https://claude.ai/artifact/N
 | 2 | Admin site: history, quarantine list, release/delete/rescan, quarantine switch, retention | next PR |
 | 3 | Rate limiting, Prometheus/Zabbix `/metrics`, startup oversize self-test, remaining hardening | PR after that |
 
+## Documentation
+
+- [Wiki](https://github.com/nc-intezra/docker-secure-upload/wiki): how each flow works, deployment and upgrade, troubleshooting.
+- [Interface Control Document, Rev 0.3](docs/icd/ICD-rev0.3.md) ([PDF](docs/icd/ICD-rev0.3.pdf)): every interface the service has, with formats, limits and open items. Draft for review, written against v0.5.3-beta.
+
 ## How it works
 
 ```
